@@ -102,40 +102,57 @@ CHECKS:
 SUMMARY: [one sentence stating overall verdict and the most critical gap if FAIL]"""
 
 
+def extract_text_from_comment_obj(obj):
+    """Pull plain text out of any comment object regardless of structure."""
+    if not obj:
+        return ""
+    # Try every known field ClickUp uses
+    for field in ("comment_text", "text_content", "text"):
+        val = obj.get(field, "")
+        if val and isinstance(val, str) and val.strip():
+            return val.strip()
+    # Rich text blocks array
+    blocks = obj.get("comment") or []
+    if isinstance(blocks, list):
+        parts = []
+        for b in blocks:
+            if isinstance(b, dict):
+                t = b.get("text", "")
+                if t and isinstance(t, str):
+                    parts.append(t.strip())
+        text = " ".join(parts).strip()
+        if text:
+            return text
+    return ""
+
+
 def determine_gate(event, status, history_items):
+    """Returns (gate, is_dry_run, trigger_comment_id)."""
     status = status.lower()
 
     if event == "taskCommentPosted":
+        trigger_comment_id = None
         comment_text = ""
         if history_items:
             item = history_items[0]
-            comment = item.get("comment", {}) or {}
-            # Try all possible locations ClickUp puts comment text
-            # Rich text blocks
-            comment_items = comment.get("comment", []) or []
-            if comment_items:
-                comment_text = " ".join(
-                    (b.get("text") or "") for b in comment_items if isinstance(b, dict)
-                ).strip()
-            # Plain text fallback
+            comment_obj = item.get("comment") or {}
+            trigger_comment_id = comment_obj.get("id") or item.get("id") or None
+            # Extract text from comment object itself
+            comment_text = extract_text_from_comment_obj(comment_obj)
+            # Fallback: text directly on the history item
             if not comment_text:
-                comment_text = comment.get("text_content", "") or ""
-            if not comment_text:
-                comment_text = comment.get("comment_text", "") or ""
-            # Sub-comment: text may be directly on history_items
-            if not comment_text:
-                comment_text = item.get("comment_text", "") or ""
-        comment_text = comment_text.lower()
-        triggers = ["subinspector check", "subinspector", "si check"]
-        if any(t in comment_text for t in triggers):
-            if any(s in status for s in PRE_EXEC_STATUSES):
-                return "PRE-EXECUTION", True
-            elif any(s in status for s in CLOSURE_STATUSES):
-                return "CLOSURE", True
-            else:
-                return "INTAKE", True
+                comment_text = extract_text_from_comment_obj(item)
 
-    return None, False
+        triggers = ["subinspector check", "subinspector", "si check"]
+        if any(t in comment_text.lower() for t in triggers):
+            if any(s in status for s in PRE_EXEC_STATUSES):
+                return "PRE-EXECUTION", True, trigger_comment_id
+            elif any(s in status for s in CLOSURE_STATUSES):
+                return "CLOSURE", True, trigger_comment_id
+            else:
+                return "INTAKE", True, trigger_comment_id
+
+    return None, False, None
 
 
 async def fetch_task(task_id):
@@ -352,13 +369,23 @@ async def evaluate_gate(gate, task):
         return data["choices"][0]["message"]["content"]
 
 
-async def post_comment(task_id, comment):
+async def post_comment(task_id, comment, reply_to_comment_id=None):
+    """Post a comment on a task. If reply_to_comment_id is set, post as a reply inside that thread."""
     async with httpx.AsyncClient(timeout=15) as client:
-        await client.post(
-            f"{CLICKUP_BASE}/task/{task_id}/comment",
-            headers={"Authorization": CLICKUP_API_KEY, "Content-Type": "application/json"},
-            json={"comment_text": comment}
-        )
+        if reply_to_comment_id:
+            # Reply inside the same thread where si check was triggered
+            await client.post(
+                f"{CLICKUP_BASE}/comment/{reply_to_comment_id}/reply",
+                headers={"Authorization": CLICKUP_API_KEY, "Content-Type": "application/json"},
+                json={"comment_text": comment}
+            )
+        else:
+            # Fallback: top-level comment on the task
+            await client.post(
+                f"{CLICKUP_BASE}/task/{task_id}/comment",
+                headers={"Authorization": CLICKUP_API_KEY, "Content-Type": "application/json"},
+                json={"comment_text": comment}
+            )
 
 
 async def revert_status(task_id, status):
@@ -393,8 +420,8 @@ async def process_webhook(payload):
         previous_status = before.get("status", "") if isinstance(before, dict) else ""
     previous_status = previous_status or "backlog"
 
-    gate, is_dry_run = determine_gate(event, status, history_items)
-    print(f"[AGENT] Gate: {gate} | Status: {status}", flush=True)
+    gate, is_dry_run, trigger_comment_id = determine_gate(event, status, history_items)
+    print(f"[AGENT] Gate: {gate} | Status: {status} | Reply to: {trigger_comment_id}", flush=True)
 
     if not gate:
         print(f"[AGENT] No gate matched — skipping", flush=True)
@@ -409,11 +436,10 @@ async def process_webhook(payload):
     score = score_match.group(1) if score_match else "0"
     passed = result == "PASS"
 
-    if is_dry_run:
-        comment = f"🔍 Dry Run — {gate} Gate Check\n\n{content}"
-    elif passed:
+    if passed:
         comment = f"✅ {gate} Gate Passed — {score}/6 checks passed.\n\n{content}"
     else:
-        comment = f"❌ {gate} Gate Failed\n\n{content}\n\nResult: {score}/6 passed. Minimum required: 6/6."
+        comment = f"❌ {gate} Gate Failed — {score}/6 checks passed.\n\n{content}"
 
-    await post_comment(task_id, comment)
+    # Reply in the same thread where si check was posted
+    await post_comment(task_id, comment, reply_to_comment_id=trigger_comment_id)
