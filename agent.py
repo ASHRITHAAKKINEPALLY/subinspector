@@ -616,14 +616,14 @@ def format_comment(gate, content, score, passed, prior_failures=0, reverted_to=N
             lines += [
                 "💡 **Next Steps**",
                 "- Fix every ❌ check listed above",
-                "- Comment `/si check` once the ticket is updated to re-evaluate",
+                "- Once updated, trigger a SubInspector re-check to re-evaluate",
             ]
         elif prior_failures == 1:
             lines += [
                 "⚠️ **2nd Failure — BA Lead Consult Required**",
                 "- This ticket has failed SubInspector gate checks **twice**",
                 "- Please discuss with **@Komal Saraogi** before making further changes",
-                "- Fix all ❌ checks above, then comment `/si check` to retry",
+                "- Fix all ❌ checks above, then trigger a re-check to retry",
             ]
         else:
             lines += [
