@@ -13,8 +13,6 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
 
 async def run_webhook(payload):
     try:
-        import json
-        print(f"[PAYLOAD] {json.dumps(payload)}", flush=True)
         await process_webhook(payload)
     except Exception as e:
         print(f"[ERROR] {e}", flush=True)

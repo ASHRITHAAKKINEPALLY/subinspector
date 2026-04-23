@@ -2,6 +2,7 @@ import os
 import re
 import io
 import base64
+import asyncio
 import httpx
 import pdfplumber
 import openpyxl
@@ -214,24 +215,17 @@ SUMMARY: [one sentence stating overall verdict and the most critical gap if FAIL
 [MASTER TICKET SCOPE ANALYSIS section here if applicable]"""
 
 
-def extract_text_from_comment_obj(obj):
-    """Pull plain text out of any comment object regardless of structure."""
+def extract_comment_text(obj):
+    """Pull plain text from any ClickUp comment object regardless of structure."""
     if not obj:
         return ""
-    # Try every known field ClickUp uses
     for field in ("comment_text", "text_content", "text"):
         val = obj.get(field, "")
         if val and isinstance(val, str) and val.strip():
             return val.strip()
-    # Rich text blocks array
     blocks = obj.get("comment") or []
     if isinstance(blocks, list):
-        parts = []
-        for b in blocks:
-            if isinstance(b, dict):
-                t = b.get("text", "")
-                if t and isinstance(t, str):
-                    parts.append(t.strip())
+        parts = [b.get("text", "").strip() for b in blocks if isinstance(b, dict) and b.get("text")]
         text = " ".join(parts).strip()
         if text:
             return text
@@ -267,9 +261,9 @@ def determine_gate(event, status, history_items):
             # If it was a top-level comment, reply directly to that comment.
             trigger_comment_id = parent_id or own_id
             print(f"[AGENT] comment own_id={own_id} parent_id={parent_id} → reply_to={trigger_comment_id}", flush=True)
-            comment_text = extract_text_from_comment_obj(comment_obj)
+            comment_text = extract_comment_text(comment_obj)
             if not comment_text:
-                comment_text = extract_text_from_comment_obj(item)
+                comment_text = extract_comment_text(item)
 
         tier_override = None
         tier_match = re.search(r"tier\s*:\s*(T[123])", comment_text, re.IGNORECASE)
@@ -367,24 +361,6 @@ async def read_attachment(url, filename):
         return f"[Attachment: {filename}] (could not read: {e})"
 
 
-def extract_comment_text(comment_obj):
-    """Extract plain text from a ClickUp comment object.
-    Handles both comment_text (plain) and comment[] (rich text blocks)."""
-    # Try plain text first
-    text = (comment_obj.get("comment_text") or "").strip()
-    if text:
-        return text
-    # Fall back to rich text blocks
-    blocks = comment_obj.get("comment") or []
-    parts = []
-    for block in blocks:
-        if isinstance(block, dict):
-            t = (block.get("text") or "").strip()
-            if t:
-                parts.append(t)
-    return " ".join(parts).strip()
-
-
 async def fetch_all_replies(comment_id, client, depth=1):
     """Recursively fetch all sub-comments at any depth."""
     indent = "  " * depth
@@ -411,7 +387,7 @@ async def fetch_all_replies(comment_id, client, depth=1):
 
 
 async def fetch_comments(task_id):
-    """Fetch all comments and their full sub-comment trees."""
+    """Fetch all comments. Returns (formatted_text_for_llm, raw_comment_list)."""
     async with httpx.AsyncClient(timeout=30) as client:
         response = await client.get(
             f"{CLICKUP_BASE}/task/{task_id}/comment",
@@ -425,11 +401,10 @@ async def fetch_comments(task_id):
             comment_id = c.get("id", "")
             if text:
                 lines.append(f"[{user}]: {text}")
-            # Fetch all replies at any depth
             if comment_id:
                 replies = await fetch_all_replies(comment_id, client, depth=1)
                 lines.extend(replies)
-        return "\n".join(lines) if lines else "None"
+        return ("\n".join(lines) if lines else "None"), comments
 
 
 async def evaluate_gate(gate, task, tier_override=None):
@@ -439,43 +414,40 @@ async def evaluate_gate(gate, task, tier_override=None):
     list_name = (task.get("list") or {}).get("name", "")
     folder_name = (task.get("folder") or {}).get("name", "")
 
-    # Fetch and read attachments
+    # Read attachments in parallel
     attachments = task.get("attachments", [])
-    print(f"[AGENT] Attachments found: {len(attachments)} — {[a.get('title', a.get('file_name','?')) for a in attachments]}", flush=True)
-    attachment_contents = []
-    for a in attachments[:5]:  # limit to 5 attachments
-        url = a.get("url", "")
-        filename = a.get("title", a.get("file_name", "attachment"))
-        if url:
-            content = await read_attachment(url, filename)
-            print(f"[AGENT] Attachment read: {filename} → {content[:80]}", flush=True)
-            attachment_contents.append(content)
-    attachment_info = "\n\n".join(attachment_contents) if attachment_contents else "None"
+    print(f"[AGENT] Attachments: {[a.get('title', a.get('file_name','?')) for a in attachments]}", flush=True)
+    valid_attachments = [(a.get("url"), a.get("title", a.get("file_name", "attachment"))) for a in attachments[:5] if a.get("url")]
+    if valid_attachments:
+        attachment_results = await asyncio.gather(*[read_attachment(url, fn) for url, fn in valid_attachments])
+        attachment_info = "\n\n".join(attachment_results)
+    else:
+        attachment_info = "None"
 
-    # Fetch each subtask individually for full details (name, description, status, assignees)
+    # Fetch all subtasks in parallel
     subtask_stubs = task.get("subtasks", [])
-    subtask_lines = []
-    async with httpx.AsyncClient(timeout=15) as st_client:
-        for stub in subtask_stubs:
-            st_id = stub.get("id", "")
-            try:
-                st_resp = await st_client.get(
-                    f"{CLICKUP_BASE}/task/{st_id}",
-                    headers={"Authorization": CLICKUP_API_KEY}
-                )
-                s = st_resp.json()
-            except Exception:
-                s = stub
-            name = s.get("name", "")
-            status = (s.get("status") or {}).get("status", "unknown")
+    subtask_count = len(subtask_stubs)
+    if subtask_stubs:
+        async with httpx.AsyncClient(timeout=15) as st_client:
+            async def _fetch_subtask(stub):
+                try:
+                    r = await st_client.get(f"{CLICKUP_BASE}/task/{stub.get('id')}", headers={"Authorization": CLICKUP_API_KEY})
+                    return r.json()
+                except Exception:
+                    return stub
+            subtasks = await asyncio.gather(*[_fetch_subtask(s) for s in subtask_stubs])
+        subtask_lines = []
+        for s in subtasks:
+            st_status = (s.get("status") or {}).get("status", "unknown")
+            st_assignees = ", ".join(a.get("username", "") for a in (s.get("assignees") or [])) or "unassigned"
+            line = f"- [{st_status}] {s.get('name', '')} (assignee: {st_assignees})"
             desc = (s.get("description") or "").strip()[:500]
-            assignees_s = ", ".join(a.get("username", "") for a in (s.get("assignees") or [])) or "unassigned"
-            line = f"- [{status}] {name} (assignee: {assignees_s})"
             if desc:
                 line += f"\n  Scope: {desc}"
             subtask_lines.append(line)
-    subtask_info = "\n".join(subtask_lines) if subtask_lines else "None (no subtasks)"
-    subtask_count = len(subtask_stubs)
+        subtask_info = "\n".join(subtask_lines)
+    else:
+        subtask_info = "None (no subtasks)"
 
     # Fetch custom fields — resolve dropdown option IDs to display names
     custom_fields = task.get("custom_fields", [])
@@ -501,8 +473,8 @@ async def evaluate_gate(gate, task, tier_override=None):
             cf_lines.append(f"- {name}: {display}")
     custom_fields_info = "\n".join(cf_lines) if cf_lines else "None"
 
-    # Fetch comments (closing notes, QA sign-offs, evidence links etc.)
-    comments_text = await fetch_comments(task_id)
+    # Fetch comments and return both formatted text (for LLM) and raw list (for failure counter)
+    comments_text, raw_comments = await fetch_comments(task_id)
 
     is_master = subtask_count > 0
     tier_line = f"Tier Override: {tier_override} (use this tier — do not infer)\n" if tier_override else ""
@@ -540,7 +512,7 @@ async def evaluate_gate(gate, task, tier_override=None):
             }
         )
         data = response.json()
-        return data["choices"][0]["message"]["content"]
+        return data["choices"][0]["message"]["content"], raw_comments
 
 
 async def post_comment(task_id, comment, reply_to_comment_id=None):
@@ -648,23 +620,23 @@ def format_comment(gate, content, score, passed, prior_failures=0, reverted_to=N
     return "\n".join(lines)
 
 
-async def count_subinspector_failures(task_id):
-    """Count prior SubInspector FAIL comments on this ticket for the anti-loop safeguard."""
+async def count_subinspector_failures(task_id, raw_comments=None):
+    """Count prior SubInspector FAIL comments. Accepts pre-fetched comments to avoid a duplicate API call."""
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(
-                f"{CLICKUP_BASE}/task/{task_id}/comment",
-                headers={"Authorization": CLICKUP_API_KEY}
-            )
-            comments = resp.json().get("comments", [])
-            count = 0
-            for c in comments:
-                text = extract_comment_text(c)
-                if ("gate failed" in text.lower() or "gate check" in text.lower()) and (
-                    "❌" in text or "FAIL" in text.upper()
-                ):
-                    count += 1
-            return count
+        if raw_comments is None:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.get(
+                    f"{CLICKUP_BASE}/task/{task_id}/comment",
+                    headers={"Authorization": CLICKUP_API_KEY}
+                )
+                raw_comments = resp.json().get("comments", [])
+        count = 0
+        for c in raw_comments:
+            text = extract_comment_text(c)
+            # Match only the bot's own structured failure comments by their signature header
+            if "🤖 **SubInspector" in text and "❌" in text:
+                count += 1
+        return count
     except Exception:
         return 0
 
@@ -677,11 +649,12 @@ async def process_webhook(payload):
     if not task_id or not event:
         return
 
-    # Skip events triggered by the bot's own actions to prevent infinite loops
+    # Skip ALL events triggered by the bot's own account to prevent loops
+    # (covers both taskCommentPosted from bot replies AND taskStatusUpdated from reverts)
     if history_items:
-        commenter_id = str((history_items[0].get("user") or {}).get("id", ""))
-        if commenter_id == BOT_USER_ID and event == "taskCommentPosted":
-            print(f"[AGENT] Skipping — comment posted by bot user {commenter_id}", flush=True)
+        actor_id = str((history_items[0].get("user") or {}).get("id", ""))
+        if actor_id == BOT_USER_ID:
+            print(f"[AGENT] Skipping — action by bot user {actor_id}", flush=True)
             return
 
     task = await fetch_task(task_id)
@@ -696,8 +669,7 @@ async def process_webhook(payload):
     previous_status = ""
     if history_items:
         before = history_items[0].get("before") or {}
-        previous_status = before.get("status", "") if isinstance(before, dict) else ""
-    previous_status = previous_status or "backlog"
+        previous_status = (before.get("status", "") if isinstance(before, dict) else "") or ""
 
     gate, is_dry_run, trigger_comment_id, tier_override = determine_gate(event, status, history_items)
     print(f"[AGENT] Gate: {gate} | Status: {status} | Reply to: {trigger_comment_id} | Tier override: {tier_override}", flush=True)
@@ -707,12 +679,12 @@ async def process_webhook(payload):
         return
 
     try:
-        content = await evaluate_gate(gate, task, tier_override=tier_override)
+        content, raw_comments = await evaluate_gate(gate, task, tier_override=tier_override)
     except Exception as e:
         print(f"[AGENT] evaluate_gate failed: {e}", flush=True)
         await post_comment(
             task_id,
-            f"⚠️ SubInspector encountered an error while evaluating the {gate} gate and could not complete the check.\n\nError: `{e}`\n\nPlease retry by commenting `si check`, or contact the bot admin if the issue persists.",
+            f"⚠️ SubInspector could not complete the {gate} gate check. Please retry with `si check`.",
             reply_to_comment_id=trigger_comment_id
         )
         return
@@ -724,15 +696,15 @@ async def process_webhook(payload):
     score = score_match.group(1) if score_match else "0"
     passed = result == "PASS"
 
-    prior_failures = 0 if passed else await count_subinspector_failures(task_id)
+    prior_failures = 0 if passed else await count_subinspector_failures(task_id, raw_comments=raw_comments)
     if not passed and prior_failures >= 2:
         print(f"[AGENT] Anti-loop triggered after {prior_failures + 1} failures — escalating to BA lead", flush=True)
 
+    can_revert = not passed and not is_dry_run and bool(previous_status)
     comment = format_comment(gate, content, score, passed, prior_failures,
-                             reverted_to=previous_status if (not passed and not is_dry_run) else None)
+                             reverted_to=previous_status if can_revert else None)
 
-    # Revert status first, then post comment
-    if not passed and not is_dry_run:
+    if can_revert:
         print(f"[AGENT] Reverting status to: {previous_status}", flush=True)
         await revert_status(task_id, previous_status)
 
