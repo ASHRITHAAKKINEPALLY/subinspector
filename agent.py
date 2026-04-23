@@ -23,6 +23,18 @@ CLICKUP_BASE = "https://api.clickup.com/api/v2"
 PRE_EXEC_STATUSES = ["ready", "in progress", "in progess", "development", "code-review", "code review"]
 CLOSURE_STATUSES = ["qa", "uat", "prod review", "prod-review", "complete", "done", "ready to close"]
 
+# When a manual /si check triggers a CLOSURE FAIL and we have no previous_status
+# from the webhook payload, revert to this fallback status.
+CLOSURE_REVERT_MAP = {
+    "complete":       "prod review",
+    "done":           "prod review",
+    "prod review":    "uat",
+    "prod-review":    "uat",
+    "ready to close": "prod review",
+    "uat":            "in progress",
+    "qa":             "in progress",
+}
+
 # Trigger patterns — require a leading slash so the bot's own next-steps
 # instructions never match and cause a loop.
 # [ \t\xa0]+ covers regular space, tab, and non-breaking space (U+00A0)
@@ -116,12 +128,16 @@ PRE-EXECUTION GATE — BI Tickets (use instead of Generic when BI ticket detecte
 
     "CLOSURE": """
 CLOSURE GATE — Generic (6 checks):
-1. Acceptance Criteria Addressed — each DoD item has explicit confirmation in comments or description.
-2. Evidence Attached — screenshots, query results, or before/after outputs attached/referenced.
-3. QA Sign-Off — reviewer OTHER than the assignee explicitly states approval ("LGTM", "approved", "sign-off confirmed"). Silence ≠ approval. Same assignee's comment does NOT count.
+IMPORTANT EVIDENCE RULE: Any Google Sheets URL, Google Docs URL, ClickUp Doc link, or GitHub PR link found in comments counts as attached evidence — PASS evidence checks even if the content is not directly readable. "Links found in comments" section lists these explicitly.
+IMPORTANT SIGN-OFF RULE: A closure notes comment from Ashritha Akkinepally (team lead) IS the QA sign-off — always PASS check 3 when she has posted closure notes. A comment from any person other than the primary work assignee that confirms completion also counts.
+IMPORTANT DOCS RULE: If the ticket is a bug fix, logic update, or config change with no mention of a BRD or downstream doc needing update, PASS check 6 — documentation N/A is implied by scope.
+
+1. Acceptance Criteria Addressed — each DoD item has explicit confirmation in comments or description. If assignee's closing notes address them, PASS.
+2. Evidence Attached — screenshots, query results, validation sheet links (Google Sheets/Docs), or before/after SQL/outputs attached, linked, or referenced. FAIL only if NO evidence of any kind exists anywhere.
+3. QA Sign-Off — Ashritha Akkinepally's closure notes = sign-off (always PASS). Any comment from someone other than the primary work assignee confirming the work counts. FAIL only if nobody other than the sole assignee has weighed in at all.
 4. No Open Subtasks — all subtasks closed (done/complete) or explicitly marked N/A.
-5. Stakeholder Notified — @mention of requester/BA/stakeholder confirming work is ready. Generic "done" without @mention = FAIL.
-6. Documentation Updated — downstream docs/BRD updated or explicitly marked N/A. Absence with no N/A = FAIL.
+5. Stakeholder Notified — @mention of requester/BA/stakeholder confirming work is ready, OR closure notes explicitly addressed to the team. Generic "done" with no @mention and no closure notes = FAIL.
+6. Documentation Updated — updated, linked, or explicitly marked N/A. For bug fixes / logic updates / config changes with no BRD context, PASS (N/A implied by scope).
 
 CLOSURE GATE — BI Tickets (use instead of Generic when BI ticket detected):
 1. All KPIs validated with before/after numbers or screenshots.
@@ -201,7 +217,8 @@ def determine_gate(event, status, history_items):
             if any(s in status for s in PRE_EXEC_STATUSES):
                 return "PRE-EXECUTION", True, trigger_comment_id, tier_override
             elif any(s in status for s in CLOSURE_STATUSES):
-                return "CLOSURE", True, trigger_comment_id, tier_override
+                # Enforce on closure — revert status if FAIL (same as auto-webhook)
+                return "CLOSURE", False, trigger_comment_id, tier_override
             else:
                 return "INTAKE", True, trigger_comment_id, tier_override
         else:
@@ -463,9 +480,28 @@ async def evaluate_gate(gate, task, tier_override=None):
     # Fetch comments and return both formatted text (for LLM) and raw list (for failure counter)
     comments_text, raw_comments = await fetch_comments(task_id)
 
-    # Cap sections tightly — system prompt is ~850 tokens, output ~1500 tokens,
-    # leaving ~3500 tokens (~14000 chars) for the user message on the 6k TPM free tier.
-    comments_text_capped  = comments_text[:2500]
+    # Extract all notable links from the FULL comment text before capping,
+    # so the LLM always knows about linked sheets/docs even if they're cut off.
+    _url_re = re.compile(r'https?://\S+')
+    _all_urls = _url_re.findall(comments_text)
+    _sheet_urls  = [u for u in _all_urls if 'docs.google.com/spreadsheet' in u or 'sheets.google.com' in u]
+    _gdoc_urls   = [u for u in _all_urls if 'docs.google.com/document' in u]
+    _cu_doc_urls = [u for u in _all_urls if 'app.clickup.com' in u and '/docs/' in u]
+    _gh_urls     = [u for u in _all_urls if 'github.com' in u and '/pull/' in u]
+    _link_parts  = []
+    if _sheet_urls:
+        _link_parts.append("Google Sheets (validation/data evidence): " + ", ".join(_sheet_urls[:5]))
+    if _gdoc_urls:
+        _link_parts.append("Google Docs: " + ", ".join(_gdoc_urls[:3]))
+    if _cu_doc_urls:
+        _link_parts.append("ClickUp Docs: " + ", ".join(_cu_doc_urls[:3]))
+    if _gh_urls:
+        _link_parts.append("GitHub PRs: " + ", ".join(_gh_urls[:3]))
+    links_section = ("Links found in comments (count as attached evidence):\n" + "\n".join(_link_parts)) if _link_parts else "None"
+
+    # Cap sections — system prompt ~850 tokens, output ~1500 tokens,
+    # links_section is tiny, leaving ~3500 tokens for the rest of the user message.
+    comments_text_capped  = comments_text[:4000]
     attachment_info_capped = attachment_info[:2500]
     subtask_info_capped    = subtask_info[:1500]
 
@@ -494,6 +530,7 @@ async def evaluate_gate(gate, task, tier_override=None):
         f"Folder: {folder_name}\n"
         f"Is Master Ticket: {'YES — has ' + str(subtask_count) + ' subtasks' if is_master else 'NO'}\n"
         f"NOTE: [table-embed:...] markers in the description are embedded data tables and count as evidence.\n"
+        f"{links_section}\n\n"
         f"Description:\n{description}\n\n"
         f"Comments (closing notes, QA sign-offs, evidence, sub-comments):\n{comments_text_capped}\n\n"
         f"Attachments (actual content read):\n{attachment_info_capped}\n\n"
@@ -501,9 +538,9 @@ async def evaluate_gate(gate, task, tier_override=None):
         f"Custom Fields:\n{custom_fields_info}"
     )
 
-    # Hard cap — keep total tokens under 4000 chars user msg to stay within 6k TPM free tier
-    if len(user_message) > 10000:
-        user_message = user_message[:10000] + "\n\n[TRUNCATED]"
+    # Hard cap — system ~850 tokens + output ~1500 tokens + user ~3500 tokens = ~5850 total, under 6k TPM
+    if len(user_message) > 13000:
+        user_message = user_message[:13000] + "\n\n[TRUNCATED]"
 
     if not GROQ_API_KEY:
         raise ValueError("GROQ_API_KEY environment variable is not set")
@@ -817,6 +854,13 @@ async def process_webhook(payload):
         previous_status = (before.get("status", "") if isinstance(before, dict) else "") or ""
 
     gate, is_dry_run, trigger_comment_id, tier_override = determine_gate(event, status, history_items)
+
+    # For CLOSURE gate with no previous_status (e.g. manual /si check), use the
+    # revert map so enforcement still works even without a webhook history entry.
+    if gate == "CLOSURE" and not previous_status:
+        previous_status = CLOSURE_REVERT_MAP.get(status.lower(), "")
+        if previous_status:
+            print(f"[AGENT] No previous_status in payload — CLOSURE_REVERT_MAP: '{status}' → '{previous_status}'", flush=True)
     print(f"[AGENT] Gate: {gate} | Status: {status} | Reply to: {trigger_comment_id} | Tier override: {tier_override}", flush=True)
 
     if not gate:
