@@ -187,8 +187,6 @@ def process_webhook(payload):
     if not task_id or not event:
         return
     task = fetch_task(task_id)
-    folder_id = str((task.get("folder") or {}).get("id", ""))
-    in_scope = folder_id in ENFORCEMENT_FOLDERS
     status = (task.get("status") or {}).get("status", "")
     previous_status = ""
     if history_items:
@@ -209,11 +207,9 @@ def process_webhook(payload):
     elif passed:
         comment = f"✅ {gate} Gate Passed — {score}/6 checks passed.\n\n{content}"
     else:
-        comment = f"🔁 Status Reverted — {gate} Gate Failed\n\n{content}\n\nResult: {score}/6 passed. Minimum required: 6/6."
-        if in_scope:
-            comment += f"\n\nTicket reverted to: {previous_status}\n@Komal Saraogi — please review."
+        comment = f"🔁 Status Reverted — {gate} Gate Failed\n\n{content}\n\nResult: {score}/6 passed. Minimum required: 6/6.\n\nTicket reverted to: {previous_status}\n@Komal Saraogi — please review."
     post_comment(task_id, comment)
-    if not passed and not is_dry_run and in_scope:
+    if not passed and not is_dry_run:
         revert_status(task_id, previous_status)
 
 
