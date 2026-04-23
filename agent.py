@@ -670,29 +670,16 @@ async def process_webhook(payload):
     if not task_id or not event:
         return
 
-    # Skip events from the bot's own account to prevent loops:
-    # - taskStatusUpdated: always skip (prevents revert → re-evaluate loop)
-    # - taskCommentPosted: skip UNLESS the comment is a short trigger phrase
-    #   typed by a human. The bot's evaluation reports are hundreds of chars;
-    #   a real "si check" command is under 100 chars. Use length to discriminate.
+    # Skip ALL events from the bot's own account to prevent loops.
+    # The bot posts comments using the same ClickUp account as the API key owner,
+    # so we cannot distinguish the bot's replies from the owner's manual comments
+    # by user ID alone. The owner should use a teammate's account to post "si check",
+    # or trigger re-evaluation by moving the ticket status.
     if history_items:
         actor_id = str((history_items[0].get("user") or {}).get("id", ""))
         if actor_id == BOT_USER_ID:
-            if event == "taskStatusUpdated":
-                print(f"[AGENT] Skipping — taskStatusUpdated from bot account", flush=True)
-                return
-            if event == "taskCommentPosted":
-                item = history_items[0]
-                comment_obj = (
-                    item.get("comment")
-                    or (item.get("data") or {}).get("comment")
-                    or {}
-                )
-                raw_text = (extract_comment_text(comment_obj) or extract_comment_text(item) or "").strip()
-                is_short_trigger = _is_trigger(raw_text) and len(raw_text) <= 100
-                if not is_short_trigger:
-                    print(f"[AGENT] Skipping — bot account comment (len={len(raw_text)})", flush=True)
-                    return
+            print(f"[AGENT] Skipping — action by bot account {actor_id}", flush=True)
+            return
 
     task = await fetch_task(task_id)
 
