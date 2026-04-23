@@ -114,7 +114,8 @@ def determine_gate(event, status, history_items):
             if not comment_text:
                 comment_text = comment.get("text_content", "") or ""
         comment_text = comment_text.lower()
-        if "/si check" in comment_text or "/subinspector check" in comment_text:
+        triggers = ["subinspector check", "subinspector", "si check"]
+        if any(t in comment_text for t in triggers):
             if any(s in status for s in PRE_EXEC_STATUSES):
                 return "PRE-EXECUTION", True
             elif any(s in status for s in CLOSURE_STATUSES):
@@ -187,6 +188,9 @@ def process_webhook(payload):
     if not task_id or not event:
         return
     task = fetch_task(task_id)
+    folder_id = str((task.get("folder") or {}).get("id", ""))
+    if folder_id not in ENFORCEMENT_FOLDERS:
+        return
     status = (task.get("status") or {}).get("status", "")
     previous_status = ""
     if history_items:
