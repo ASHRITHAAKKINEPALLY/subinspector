@@ -100,20 +100,7 @@ SUMMARY: [one sentence stating overall verdict and the most critical gap if FAIL
 def determine_gate(event, status, history_items):
     status = status.lower()
 
-    if event == "taskCreated":
-        return "INTAKE", False
-
-    elif event == "taskStatusUpdated":
-        new_status = ""
-        if history_items:
-            new_status = (history_items[0].get("after", {}) or {}).get("status", "") or ""
-        new_status = new_status.lower()
-        if any(s in new_status for s in PRE_EXEC_STATUSES):
-            return "PRE-EXECUTION", False
-        elif any(s in new_status for s in CLOSURE_STATUSES):
-            return "CLOSURE", False
-
-    elif event == "taskCommentPosted":
+    if event == "taskCommentPosted":
         comment_text = ""
         if history_items:
             comment = history_items[0].get("comment", {}) or {}
@@ -123,8 +110,8 @@ def determine_gate(event, status, history_items):
             if not comment_text:
                 comment_text = comment.get("text_content", "") or ""
         comment_text = comment_text.lower()
-
-        if "/si check" in comment_text or "/subinspector check" in comment_text:
+        triggers = ["subinspector check", "subinspector", "si check"]
+        if any(t in comment_text for t in triggers):
             if any(s in status for s in PRE_EXEC_STATUSES):
                 return "PRE-EXECUTION", True
             elif any(s in status for s in CLOSURE_STATUSES):
@@ -210,7 +197,8 @@ async def process_webhook(payload):
     task = await fetch_task(task_id)
 
     folder_id = str((task.get("folder") or {}).get("id", ""))
-    in_scope = folder_id in ENFORCEMENT_FOLDERS
+    if folder_id not in ENFORCEMENT_FOLDERS:
+        return
 
     status = (task.get("status") or {}).get("status", "")
     previous_status = ""
@@ -238,11 +226,6 @@ async def process_webhook(payload):
     elif passed:
         comment = f"✅ {gate} Gate Passed — {score}/6 checks passed.\n\n{content}"
     else:
-        comment = f"🔁 Status Reverted — {gate} Gate Failed\n\n{content}\n\nResult: {score}/6 passed. Minimum required: 6/6."
-        if in_scope:
-            comment += f"\n\nTicket reverted to: {previous_status}\n@Komal Saraogi — please review."
+        comment = f"❌ {gate} Gate Failed\n\n{content}\n\nResult: {score}/6 passed. Minimum required: 6/6."
 
     await post_comment(task_id, comment)
-
-    if not passed and not is_dry_run and in_scope:
-        await revert_status(task_id, previous_status)
