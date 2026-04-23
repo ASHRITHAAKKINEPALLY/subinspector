@@ -731,7 +731,7 @@ async def process_webhook(payload):
         traceback.print_exc()
         await post_comment(
             task_id,
-            f"⚠️ SubInspector could not complete the {gate} gate check. Please retry with `/si check`.",
+            f"⚠️ SubInspector could not complete the {gate} gate check. Please trigger a re-check to retry.",
             reply_to_comment_id=trigger_comment_id
         )
         return
