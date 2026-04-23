@@ -126,16 +126,59 @@ async def fetch_task(task_id):
     async with httpx.AsyncClient(timeout=15) as client:
         response = await client.get(
             f"{CLICKUP_BASE}/task/{task_id}",
-            headers={"Authorization": CLICKUP_API_KEY}
+            headers={"Authorization": CLICKUP_API_KEY},
+            params={"include_subtasks": "true"}
         )
         return response.json()
 
 
+async def fetch_comments(task_id):
+    async with httpx.AsyncClient(timeout=15) as client:
+        response = await client.get(
+            f"{CLICKUP_BASE}/task/{task_id}/comment",
+            headers={"Authorization": CLICKUP_API_KEY}
+        )
+        data = response.json()
+        comments = data.get("comments", [])
+        lines = []
+        for c in comments:
+            user = (c.get("user") or {}).get("username", "unknown")
+            text = c.get("comment_text", "")
+            if text and text.strip():
+                lines.append(f"- [{user}]: {text.strip()}")
+        return "\n".join(lines[:30]) if lines else "None"
+
+
 async def evaluate_gate(gate, task):
+    task_id = task.get("id", "")
     description = (task.get("description") or "")[:4000]
     assignees = ", ".join(a.get("username", "") for a in task.get("assignees", [])) or "None"
     list_name = (task.get("list") or {}).get("name", "")
     folder_name = (task.get("folder") or {}).get("name", "")
+
+    # Fetch attachments info
+    attachments = task.get("attachments", [])
+    attachment_info = ", ".join(a.get("title", a.get("url", "")) for a in attachments) if attachments else "None"
+
+    # Fetch subtasks
+    subtasks = task.get("subtasks", [])
+    subtask_info = "\n".join(
+        f"- {s.get('name','')} [{(s.get('status') or {}).get('status','unknown')}]"
+        for s in subtasks
+    ) if subtasks else "None"
+
+    # Fetch custom fields
+    custom_fields = task.get("custom_fields", [])
+    cf_lines = []
+    for cf in custom_fields:
+        name = cf.get("name", "")
+        value = cf.get("value", "")
+        if name and value not in (None, "", [], {}):
+            cf_lines.append(f"- {name}: {value}")
+    custom_fields_info = "\n".join(cf_lines) if cf_lines else "None"
+
+    # Fetch comments (closing notes, QA sign-offs, evidence links etc.)
+    comments_text = await fetch_comments(task_id)
 
     user_message = (
         f"Gate: {gate}\n"
@@ -144,7 +187,11 @@ async def evaluate_gate(gate, task):
         f"Assignees: {assignees}\n"
         f"List: {list_name}\n"
         f"Folder: {folder_name}\n"
-        f"Description:\n{description}"
+        f"Description:\n{description}\n\n"
+        f"Comments (includes closing notes, QA sign-offs, evidence):\n{comments_text}\n\n"
+        f"Attachments: {attachment_info}\n\n"
+        f"Subtasks:\n{subtask_info}\n\n"
+        f"Custom Fields:\n{custom_fields_info}"
     )
 
     async with httpx.AsyncClient(timeout=30) as client:
