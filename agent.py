@@ -672,10 +672,9 @@ async def process_webhook(payload):
 
     # Skip events from the bot's own account to prevent loops:
     # - taskStatusUpdated: always skip (prevents revert → re-evaluate loop)
-    # - taskCommentPosted: skip ONLY if the comment is the bot's own evaluation
-    #   response (contains the bot signature). This lets the API key owner post
-    #   "si check" manually while still blocking the bot's own comments from
-    #   re-triggering (the bot's next-steps text contains "si check").
+    # - taskCommentPosted: skip UNLESS the comment is a short trigger phrase
+    #   typed by a human. The bot's evaluation reports are hundreds of chars;
+    #   a real "si check" command is under 100 chars. Use length to discriminate.
     if history_items:
         actor_id = str((history_items[0].get("user") or {}).get("id", ""))
         if actor_id == BOT_USER_ID:
@@ -689,9 +688,10 @@ async def process_webhook(payload):
                     or (item.get("data") or {}).get("comment")
                     or {}
                 )
-                raw_text = extract_comment_text(comment_obj) or extract_comment_text(item) or ""
-                if "🤖 **SubInspector" in raw_text:
-                    print(f"[AGENT] Skipping — bot's own evaluation comment", flush=True)
+                raw_text = (extract_comment_text(comment_obj) or extract_comment_text(item) or "").strip()
+                is_short_trigger = _is_trigger(raw_text) and len(raw_text) <= 100
+                if not is_short_trigger:
+                    print(f"[AGENT] Skipping — bot account comment (len={len(raw_text)})", flush=True)
                     return
 
     task = await fetch_task(task_id)
