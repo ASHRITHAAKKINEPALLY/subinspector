@@ -540,6 +540,81 @@ async def revert_status(task_id, status):
         )
 
 
+def format_comment(gate, content, score, passed, prior_failures=0):
+    """Parse LLM output and render a clean, structured ClickUp comment."""
+
+    # ── extract pieces from LLM response ──────────────────────────────────
+    tier_match   = re.search(r"TIER:\s*(.+)", content)
+    summary_match = re.search(r"SUMMARY:\s*(.+)", content)
+    checks_match  = re.search(r"CHECKS:\n(.*?)(?=\nSUMMARY:|\nMASTER TICKET:|$)", content, re.DOTALL)
+    master_match  = re.search(r"(MASTER TICKET:.*)", content, re.DOTALL)
+
+    tier_line    = tier_match.group(1).strip()    if tier_match    else "—"
+    summary      = summary_match.group(1).strip() if summary_match else ""
+    checks_table = checks_match.group(1).strip()  if checks_match  else ""
+    master_block = master_match.group(1).strip()  if master_match  else ""
+
+    # ── header ─────────────────────────────────────────────────────────────
+    result_emoji = "✅" if passed else "❌"
+    result_word  = "PASS" if passed else "FAIL"
+
+    lines = [
+        "---",
+        f"🤖 **SubInspector — {gate} Gate**",
+        "---",
+        "",
+        f"**🏷 Tier:** {tier_line}",
+        f"**📊 Score:** {score}/6  |  {result_emoji} **{result_word}**",
+        "",
+    ]
+
+    # ── checks table ────────────────────────────────────────────────────────
+    if checks_table:
+        lines += [
+            "**Gate Checks**",
+            "",
+            checks_table,
+            "",
+        ]
+
+    # ── summary ─────────────────────────────────────────────────────────────
+    if summary:
+        lines += [
+            "---",
+            f"📝 **Summary:** {summary}",
+        ]
+
+    # ── next steps / escalation ─────────────────────────────────────────────
+    if not passed:
+        lines += ["", "---"]
+        if prior_failures == 0:
+            lines += [
+                "💡 **Next Steps**",
+                "- Fix every ❌ check listed above",
+                "- Comment `si check` once the ticket is updated to re-evaluate",
+            ]
+        elif prior_failures == 1:
+            lines += [
+                "⚠️ **2nd Failure — BA Lead Consult Required**",
+                "- This ticket has failed SubInspector gate checks **twice**",
+                "- Please discuss with **@Komal Saraogi** before making further changes",
+                "- Fix all ❌ checks above, then comment `si check` to retry",
+            ]
+        else:
+            lines += [
+                f"🚨 **Repeated Failure ({prior_failures + 1} total) — Enforcement Suspended**",
+                f"- **@Komal Saraogi** — manual review required before this ticket can proceed",
+                "- Automatic gate enforcement is paused; the team must resolve this manually",
+            ]
+
+    # ── master ticket scope analysis ────────────────────────────────────────
+    if master_block:
+        lines += ["", "---", "**📋 Master Ticket Scope Analysis**", "", master_block]
+
+    lines += ["", "---"]
+    return "\n".join(lines)
+
+
 async def count_subinspector_failures(task_id):
     """Count prior SubInspector FAIL comments on this ticket for the anti-loop safeguard."""
     try:
@@ -609,28 +684,11 @@ async def process_webhook(payload):
     score = score_match.group(1) if score_match else "0"
     passed = result == "PASS"
 
-    if passed:
-        comment = f"✅ {gate} Gate Passed — {score}/6 checks passed.\n\n{content}"
-    else:
-        # Anti-loop safeguard: count prior FAIL comments from SubInspector
-        prior_failures = await count_subinspector_failures(task_id)
-        if prior_failures == 0:
-            comment = f"❌ {gate} Gate Failed — {score}/6 checks passed.\n\n{content}"
-        elif prior_failures == 1:
-            comment = (
-                f"❌ {gate} Gate Failed (2nd attempt) — {score}/6 checks passed.\n\n{content}\n\n"
-                f"⚠️ This ticket has failed gate checks twice. "
-                f"Please consult @Komal Saraogi (BA Lead) before resubmitting."
-            )
-        else:
-            # 3rd+ failure — escalate, do not keep repeating the same block
-            comment = (
-                f"🚨 {gate} Gate — Repeated Failures ({prior_failures + 1} total)\n\n{content}\n\n"
-                f"@Komal Saraogi — This ticket has failed SubInspector gate checks "
-                f"{prior_failures + 1} times. Automatic enforcement suspended. "
-                f"Manual review required before this ticket can proceed."
-            )
-            print(f"[AGENT] Anti-loop triggered after {prior_failures + 1} failures — escalating to BA lead", flush=True)
+    prior_failures = 0 if passed else await count_subinspector_failures(task_id)
+    if not passed and prior_failures >= 2:
+        print(f"[AGENT] Anti-loop triggered after {prior_failures + 1} failures — escalating to BA lead", flush=True)
+
+    comment = format_comment(gate, content, score, passed, prior_failures)
 
     # Reply in the same thread where si check was posted
     await post_comment(task_id, comment, reply_to_comment_id=trigger_comment_id)
