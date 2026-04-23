@@ -93,18 +93,7 @@ SUMMARY: [one sentence stating overall verdict and the most critical gap if FAIL
 
 def determine_gate(event, status, history_items):
     status = status.lower()
-    if event == "taskCreated":
-        return "INTAKE", False
-    elif event == "taskStatusUpdated":
-        new_status = ""
-        if history_items:
-            new_status = (history_items[0].get("after", {}) or {}).get("status", "") or ""
-        new_status = new_status.lower()
-        if any(s in new_status for s in PRE_EXEC_STATUSES):
-            return "PRE-EXECUTION", False
-        elif any(s in new_status for s in CLOSURE_STATUSES):
-            return "CLOSURE", False
-    elif event == "taskCommentPosted":
+    if event == "taskCommentPosted":
         comment_text = ""
         if history_items:
             comment = history_items[0].get("comment", {}) or {}
