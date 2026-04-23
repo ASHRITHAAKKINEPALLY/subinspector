@@ -289,13 +289,16 @@ def determine_gate(event, status, history_items):
 
 
 async def fetch_task(task_id):
-    async with httpx.AsyncClient(timeout=15) as client:
+    async with httpx.AsyncClient(timeout=20) as client:
         response = await client.get(
             f"{CLICKUP_BASE}/task/{task_id}",
             headers={"Authorization": CLICKUP_API_KEY},
             params={"include_subtasks": "true"}
         )
-        return response.json()
+        data = response.json()
+        if response.status_code >= 400 or "err" in data or not data.get("id"):
+            raise ValueError(f"ClickUp task fetch failed (HTTP {response.status_code}): {str(data)[:300]}")
+        return data
 
 
 async def read_attachment(url, filename):
@@ -398,24 +401,37 @@ async def fetch_all_replies(comment_id, client, depth=1):
 
 
 async def fetch_comments(task_id):
-    """Fetch all comments. Returns (formatted_text_for_llm, raw_comment_list)."""
-    async with httpx.AsyncClient(timeout=30) as client:
-        response = await client.get(
-            f"{CLICKUP_BASE}/task/{task_id}/comment",
-            headers={"Authorization": CLICKUP_API_KEY}
-        )
-        comments = response.json().get("comments", [])
-        lines = []
-        for c in comments:
-            user = (c.get("user") or {}).get("username", "unknown")
-            text = extract_comment_text(c)
-            comment_id = c.get("id", "")
-            if text:
-                lines.append(f"[{user}]: {text}")
-            if comment_id:
-                replies = await fetch_all_replies(comment_id, client, depth=1)
-                lines.extend(replies)
-        return ("\n".join(lines) if lines else "None"), comments
+    """Fetch all comments. Returns (formatted_text_for_llm, raw_comment_list). Never raises."""
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.get(
+                f"{CLICKUP_BASE}/task/{task_id}/comment",
+                headers={"Authorization": CLICKUP_API_KEY}
+            )
+            try:
+                body = response.json()
+            except Exception:
+                print(f"[AGENT] fetch_comments: non-JSON response (HTTP {response.status_code})", flush=True)
+                return "None", []
+            comments = body.get("comments", []) if isinstance(body, dict) else []
+            lines = []
+            for c in comments:
+                user = (c.get("user") or {}).get("username", "unknown")
+                text = extract_comment_text(c)
+                comment_id = c.get("id", "")
+                if text:
+                    lines.append(f"[{user}]: {text}")
+                if comment_id:
+                    try:
+                        replies = await fetch_all_replies(comment_id, client, depth=1)
+                        lines.extend(replies)
+                    except Exception:
+                        pass
+            return ("\n".join(lines) if lines else "None"), comments
+    except Exception as e:
+        print(f"[AGENT] fetch_comments failed entirely: {e}", flush=True)
+        traceback.print_exc()
+        return "None", []
 
 
 async def evaluate_gate(gate, task, tier_override=None):
@@ -425,28 +441,47 @@ async def evaluate_gate(gate, task, tier_override=None):
     list_name = (task.get("list") or {}).get("name", "")
     folder_name = (task.get("folder") or {}).get("name", "")
 
-    # Read attachments in parallel
+    # Read attachments in parallel — use return_exceptions so one bad attachment never kills the whole eval
     attachments = task.get("attachments", [])
     print(f"[AGENT] Attachments: {[a.get('title', a.get('file_name','?')) for a in attachments]}", flush=True)
     valid_attachments = [(a.get("url"), a.get("title", a.get("file_name", "attachment"))) for a in attachments[:5] if a.get("url")]
     if valid_attachments:
-        attachment_results = await asyncio.gather(*[read_attachment(url, fn) for url, fn in valid_attachments])
-        attachment_info = "\n\n".join(attachment_results)
+        try:
+            attachment_results = await asyncio.gather(
+                *[read_attachment(url, fn) for url, fn in valid_attachments],
+                return_exceptions=True
+            )
+            attachment_info = "\n\n".join(
+                r if isinstance(r, str) else f"[Attachment error: {r}]"
+                for r in attachment_results
+            )
+        except Exception as e:
+            print(f"[AGENT] Attachment gather failed: {e}", flush=True)
+            attachment_info = "None"
     else:
         attachment_info = "None"
 
-    # Fetch all subtasks in parallel
+    # Fetch all subtasks in parallel — return_exceptions so one failing subtask doesn't abort
     subtask_stubs = task.get("subtasks", [])
     subtask_count = len(subtask_stubs)
     if subtask_stubs:
-        async with httpx.AsyncClient(timeout=15) as st_client:
-            async def _fetch_subtask(stub):
-                try:
-                    r = await st_client.get(f"{CLICKUP_BASE}/task/{stub.get('id')}", headers={"Authorization": CLICKUP_API_KEY})
-                    return r.json()
-                except Exception:
-                    return stub
-            subtasks = await asyncio.gather(*[_fetch_subtask(s) for s in subtask_stubs])
+        try:
+            async with httpx.AsyncClient(timeout=15) as st_client:
+                async def _fetch_subtask(stub):
+                    try:
+                        r = await st_client.get(f"{CLICKUP_BASE}/task/{stub.get('id')}", headers={"Authorization": CLICKUP_API_KEY})
+                        d = r.json()
+                        return d if isinstance(d, dict) and d.get("id") else stub
+                    except Exception:
+                        return stub
+                subtasks_raw = await asyncio.gather(
+                    *[_fetch_subtask(s) for s in subtask_stubs],
+                    return_exceptions=True
+                )
+                subtasks = [s if isinstance(s, dict) else stub for s, stub in zip(subtasks_raw, subtask_stubs)]
+        except Exception as e:
+            print(f"[AGENT] Subtask gather failed: {e}", flush=True)
+            subtasks = subtask_stubs
         subtask_lines = []
         for s in subtasks:
             st_status = (s.get("status") or {}).get("status", "unknown")
@@ -514,29 +549,59 @@ async def evaluate_gate(gate, task, tier_override=None):
     if len(user_message) > 20000:
         user_message = user_message[:20000] + "\n\n[TRUNCATED — ticket content too large]"
 
+    if not GROQ_API_KEY:
+        raise ValueError("GROQ_API_KEY environment variable is not set")
+
     print(f"[AGENT] Sending to Groq — prompt size: {len(user_message)} chars", flush=True)
 
-    async with httpx.AsyncClient(timeout=60) as client:
-        response = await client.post(
-            GROQ_URL,
-            headers={
-                "Authorization": f"Bearer {GROQ_API_KEY}",
-                "Content-Type": "application/json"
-            },
-            json={
-                "model": "llama-3.3-70b-versatile",
-                "temperature": 0.1,
-                "max_tokens": 2000,
-                "messages": [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": user_message}
-                ]
-            }
-        )
-        data = response.json()
-        if "choices" not in data:
-            raise ValueError(f"Groq error (HTTP {response.status_code}): {data}")
-        return data["choices"][0]["message"]["content"], raw_comments
+    last_error = None
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                response = await client.post(
+                    GROQ_URL,
+                    headers={
+                        "Authorization": f"Bearer {GROQ_API_KEY}",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "model": "llama-3.3-70b-versatile",
+                        "temperature": 0.1,
+                        "max_tokens": 2000,
+                        "messages": [
+                            {"role": "system", "content": SYSTEM_PROMPT},
+                            {"role": "user", "content": user_message}
+                        ]
+                    }
+                )
+                # Rate limited — wait and retry
+                if response.status_code == 429:
+                    wait_sec = 15 * (attempt + 1)
+                    print(f"[AGENT] Groq rate limited (attempt {attempt+1}/3) — waiting {wait_sec}s", flush=True)
+                    await asyncio.sleep(wait_sec)
+                    last_error = ValueError(f"Groq rate limited after {attempt+1} attempts")
+                    continue
+
+                # Parse JSON safely — Groq can return HTML on 5xx
+                try:
+                    data = response.json()
+                except Exception:
+                    raw_body = response.text[:500]
+                    raise ValueError(f"Groq non-JSON response (HTTP {response.status_code}): {raw_body}")
+
+                if "choices" not in data:
+                    raise ValueError(f"Groq error (HTTP {response.status_code}): {data}")
+
+                print(f"[AGENT] Groq responded OK (attempt {attempt+1})", flush=True)
+                return data["choices"][0]["message"]["content"], raw_comments
+
+        except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError) as e:
+            print(f"[AGENT] Groq network error (attempt {attempt+1}/3): {e}", flush=True)
+            last_error = e
+            if attempt < 2:
+                await asyncio.sleep(5)
+
+    raise last_error or ValueError("Groq failed after 3 attempts")
 
 
 async def post_comment(task_id, comment, reply_to_comment_id=None):
