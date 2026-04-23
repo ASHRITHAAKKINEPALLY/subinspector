@@ -670,15 +670,29 @@ async def process_webhook(payload):
     if not task_id or not event:
         return
 
-    # Skip taskStatusUpdated events triggered by the bot's own account (revert loop prevention).
-    # We do NOT skip taskCommentPosted from the bot account because the API key owner
-    # may post "si check" manually — and the bot's own structured comments never contain
-    # the trigger phrase, so there is no comment loop risk.
-    if event == "taskStatusUpdated" and history_items:
+    # Skip events from the bot's own account to prevent loops:
+    # - taskStatusUpdated: always skip (prevents revert → re-evaluate loop)
+    # - taskCommentPosted: skip ONLY if the comment is the bot's own evaluation
+    #   response (contains the bot signature). This lets the API key owner post
+    #   "si check" manually while still blocking the bot's own comments from
+    #   re-triggering (the bot's next-steps text contains "si check").
+    if history_items:
         actor_id = str((history_items[0].get("user") or {}).get("id", ""))
         if actor_id == BOT_USER_ID:
-            print(f"[AGENT] Skipping — taskStatusUpdated from bot account {actor_id}", flush=True)
-            return
+            if event == "taskStatusUpdated":
+                print(f"[AGENT] Skipping — taskStatusUpdated from bot account", flush=True)
+                return
+            if event == "taskCommentPosted":
+                item = history_items[0]
+                comment_obj = (
+                    item.get("comment")
+                    or (item.get("data") or {}).get("comment")
+                    or {}
+                )
+                raw_text = extract_comment_text(comment_obj) or extract_comment_text(item) or ""
+                if "🤖 **SubInspector" in raw_text:
+                    print(f"[AGENT] Skipping — bot's own evaluation comment", flush=True)
+                    return
 
     task = await fetch_task(task_id)
 
