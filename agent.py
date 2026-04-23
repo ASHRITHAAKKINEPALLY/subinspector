@@ -19,10 +19,12 @@ PRE_EXEC_STATUSES = ["ready", "in progress", "in progess", "development", "code-
 CLOSURE_STATUSES = ["qa", "uat", "prod review", "prod-review", "complete", "done", "ready to close"]
 
 # Trigger patterns — require a leading slash so the bot's own next-steps
-# instructions ("Comment `si check`...") never match and cause a loop.
+# instructions never match and cause a loop.
+# [ \t\xa0]+ covers regular space, tab, and non-breaking space (U+00A0)
+# which ClickUp inserts when typing in the comment box.
 _TRIGGER_PATTERNS = [
-    re.compile(r'/subinspector[ \t]+check\b', re.IGNORECASE),
-    re.compile(r'/si[ \t]+check\b',           re.IGNORECASE),
+    re.compile(r'/subinspector[ \t\xa0]+check\b', re.IGNORECASE),
+    re.compile(r'/si[ \t\xa0]+check\b',           re.IGNORECASE),
 ]
 
 # User ID of the account the bot posts under — skip comments from this user
