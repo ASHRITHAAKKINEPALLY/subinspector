@@ -240,10 +240,18 @@ def determine_gate(event, status, history_items):
     """Returns (gate, is_dry_run, trigger_comment_id, tier_override)."""
     status = status.lower()
 
-    # Auto-check every new ticket at creation time
+    # Auto-check every new ticket at creation time (no revert — intake only)
     if event == "taskCreated":
         return "INTAKE", False, None, None
 
+    # Status change → enforce gate, revert if it fails (is_dry_run=False)
+    if event == "taskStatusUpdated":
+        if any(s in status for s in PRE_EXEC_STATUSES):
+            return "PRE-EXECUTION", False, None, None
+        elif any(s in status for s in CLOSURE_STATUSES):
+            return "CLOSURE", False, None, None
+
+    # Manual si check comment → report only, never revert (is_dry_run=True)
     if event == "taskCommentPosted":
         trigger_comment_id = None
         comment_text = ""
@@ -251,13 +259,10 @@ def determine_gate(event, status, history_items):
             item = history_items[0]
             comment_obj = item.get("comment") or {}
             trigger_comment_id = comment_obj.get("id") or item.get("id") or None
-            # Extract text from comment object itself
             comment_text = extract_text_from_comment_obj(comment_obj)
-            # Fallback: text directly on the history item
             if not comment_text:
                 comment_text = extract_text_from_comment_obj(item)
 
-        # Check for tier override in the triggering comment (e.g. "si check tier: T1")
         tier_override = None
         tier_match = re.search(r"tier\s*:\s*(T[123])", comment_text, re.IGNORECASE)
         if tier_match:
@@ -552,7 +557,7 @@ async def revert_status(task_id, status):
         )
 
 
-def format_comment(gate, content, score, passed, prior_failures=0):
+def format_comment(gate, content, score, passed, prior_failures=0, reverted_to=None):
     """Parse LLM output and render a clean, structured ClickUp comment."""
 
     # ── extract pieces from LLM response ──────────────────────────────────
@@ -577,8 +582,10 @@ def format_comment(gate, content, score, passed, prior_failures=0):
         "",
         f"**🏷 Tier:** {tier_line}",
         f"**📊 Score:** {score}/6  |  {result_emoji} **{result_word}**",
-        "",
     ]
+    if reverted_to:
+        lines.append(f"🔁 **Status reverted to:** `{reverted_to}`")
+    lines.append("")
 
     # ── checks table ────────────────────────────────────────────────────────
     if checks_table:
@@ -700,7 +707,12 @@ async def process_webhook(payload):
     if not passed and prior_failures >= 2:
         print(f"[AGENT] Anti-loop triggered after {prior_failures + 1} failures — escalating to BA lead", flush=True)
 
-    comment = format_comment(gate, content, score, passed, prior_failures)
+    comment = format_comment(gate, content, score, passed, prior_failures,
+                             reverted_to=previous_status if (not passed and not is_dry_run) else None)
 
-    # Reply in the same thread where si check was posted
+    # Revert status first, then post comment
+    if not passed and not is_dry_run:
+        print(f"[AGENT] Reverting status to: {previous_status}", flush=True)
+        await revert_status(task_id, previous_status)
+
     await post_comment(task_id, comment, reply_to_comment_id=trigger_comment_id)
