@@ -258,7 +258,13 @@ def determine_gate(event, status, history_items):
         if history_items:
             item = history_items[0]
             comment_obj = item.get("comment") or {}
-            trigger_comment_id = comment_obj.get("id") or item.get("id") or None
+            own_id    = comment_obj.get("id") or item.get("id") or None
+            parent_id = comment_obj.get("parent") or None
+            # If si check was posted as a sub-comment (reply), reply to the
+            # parent thread so the response appears in the same thread.
+            # If it was a top-level comment, reply directly to that comment.
+            trigger_comment_id = parent_id or own_id
+            print(f"[AGENT] comment own_id={own_id} parent_id={parent_id} → reply_to={trigger_comment_id}", flush=True)
             comment_text = extract_text_from_comment_obj(comment_obj)
             if not comment_text:
                 comment_text = extract_text_from_comment_obj(item)
