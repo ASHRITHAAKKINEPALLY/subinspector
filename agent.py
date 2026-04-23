@@ -3,6 +3,7 @@ import re
 import io
 import base64
 import asyncio
+import traceback
 import httpx
 import pdfplumber
 import openpyxl
@@ -358,7 +359,10 @@ async def read_attachment(url, filename):
                             }]
                         }
                     )
-                    desc = vr.json()["choices"][0]["message"]["content"]
+                    vr_data = vr.json()
+                    if "choices" not in vr_data:
+                        return f"[Image: {filename}] (vision API error: {vr_data.get('error', {}).get('message', vr_data)})"
+                    desc = vr_data["choices"][0]["message"]["content"]
                 return f"[Image: {filename}]\n{desc}"
 
             else:
@@ -368,7 +372,9 @@ async def read_attachment(url, filename):
 
 
 async def fetch_all_replies(comment_id, client, depth=1):
-    """Recursively fetch all sub-comments at any depth."""
+    """Recursively fetch sub-comments up to depth 3 to avoid infinite recursion."""
+    if depth > 3:
+        return []
     indent = "  " * depth
     lines = []
     try:
@@ -383,7 +389,6 @@ async def fetch_all_replies(comment_id, client, depth=1):
             reply_id = r.get("id", "")
             if text:
                 lines.append(f"{indent}↳ [{user}]: {text}")
-            # Recurse into sub-sub-comments
             if reply_id:
                 sub_replies = await fetch_all_replies(reply_id, client, depth + 1)
                 lines.extend(sub_replies)
@@ -482,25 +487,36 @@ async def evaluate_gate(gate, task, tier_override=None):
     # Fetch comments and return both formatted text (for LLM) and raw list (for failure counter)
     comments_text, raw_comments = await fetch_comments(task_id)
 
+    # Cap individual sections to prevent Groq context overflow on large tickets
+    comments_text_capped  = comments_text[:6000]  if len(comments_text)  > 6000  else comments_text
+    attachment_info_capped = attachment_info[:8000] if len(attachment_info) > 8000 else attachment_info
+    subtask_info_capped    = subtask_info[:4000]   if len(subtask_info)   > 4000  else subtask_info
+
     is_master = subtask_count > 0
     tier_line = f"Tier Override: {tier_override} (use this tier — do not infer)\n" if tier_override else ""
     user_message = (
         f"Gate: {gate}\n"
         f"{tier_line}"
         f"Task: {task.get('name', '')}\n"
-        f"Status: {task.get('status', {}).get('status', '')}\n"
+        f"Status: {(task.get('status') or {}).get('status', '')}\n"
         f"Assignees: {assignees}\n"
         f"List: {list_name}\n"
         f"Folder: {folder_name}\n"
         f"Is Master Ticket: {'YES — has ' + str(subtask_count) + ' subtasks' if is_master else 'NO'}\n"
         f"Description:\n{description}\n\n"
-        f"Comments (closing notes, QA sign-offs, evidence, sub-comments):\n{comments_text}\n\n"
-        f"Attachments (actual content read):\n{attachment_info}\n\n"
-        f"Subtasks ({subtask_count} total — full details):\n{subtask_info}\n\n"
+        f"Comments (closing notes, QA sign-offs, evidence, sub-comments):\n{comments_text_capped}\n\n"
+        f"Attachments (actual content read):\n{attachment_info_capped}\n\n"
+        f"Subtasks ({subtask_count} total — full details):\n{subtask_info_capped}\n\n"
         f"Custom Fields:\n{custom_fields_info}"
     )
 
-    async with httpx.AsyncClient(timeout=30) as client:
+    # Hard cap on total prompt size — llama-3.3-70b context window is ~32k tokens
+    if len(user_message) > 20000:
+        user_message = user_message[:20000] + "\n\n[TRUNCATED — ticket content too large]"
+
+    print(f"[AGENT] Sending to Groq — prompt size: {len(user_message)} chars", flush=True)
+
+    async with httpx.AsyncClient(timeout=60) as client:
         response = await client.post(
             GROQ_URL,
             headers={
@@ -683,7 +699,11 @@ async def process_webhook(payload):
             print(f"[AGENT] Skipping — taskStatusUpdated from bot account", flush=True)
             return
 
-    task = await fetch_task(task_id)
+    try:
+        task = await fetch_task(task_id)
+    except Exception as e:
+        print(f"[AGENT] fetch_task failed for {task_id}: {e}", flush=True)
+        return
 
     folder_id = str((task.get("folder") or {}).get("id", ""))
     print(f"[AGENT] Folder ID: {folder_id} | In scope: {folder_id in ENFORCEMENT_FOLDERS}", flush=True)
@@ -707,7 +727,6 @@ async def process_webhook(payload):
     try:
         content, raw_comments = await evaluate_gate(gate, task, tier_override=tier_override)
     except Exception as e:
-        import traceback
         print(f"[AGENT] evaluate_gate failed: {e}", flush=True)
         traceback.print_exc()
         await post_comment(
