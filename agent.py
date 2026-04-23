@@ -18,12 +18,11 @@ CLICKUP_BASE = "https://api.clickup.com/api/v2"
 PRE_EXEC_STATUSES = ["ready", "in progress", "in progess", "development", "code-review", "code review"]
 CLOSURE_STATUSES = ["qa", "uat", "prod review", "prod-review", "complete", "done", "ready to close"]
 
-# Trigger patterns — must match as a standalone phrase, not inside another word.
-# Standalone "subinspector" is intentionally excluded: the bot's own comments contain
-# "SubInspector —" which would match and cause an infinite loop.
+# Trigger patterns — require a leading slash so the bot's own next-steps
+# instructions ("Comment `si check`...") never match and cause a loop.
 _TRIGGER_PATTERNS = [
-    re.compile(r'\bsubinspector[ \t]+check\b', re.IGNORECASE),
-    re.compile(r'\bsi[ \t]+check\b',            re.IGNORECASE),
+    re.compile(r'/subinspector[ \t]+check\b', re.IGNORECASE),
+    re.compile(r'/si[ \t]+check\b',           re.IGNORECASE),
 ]
 
 # User ID of the account the bot posts under — skip comments from this user
@@ -617,14 +616,14 @@ def format_comment(gate, content, score, passed, prior_failures=0, reverted_to=N
             lines += [
                 "💡 **Next Steps**",
                 "- Fix every ❌ check listed above",
-                "- Comment `si check` once the ticket is updated to re-evaluate",
+                "- Comment `/si check` once the ticket is updated to re-evaluate",
             ]
         elif prior_failures == 1:
             lines += [
                 "⚠️ **2nd Failure — BA Lead Consult Required**",
                 "- This ticket has failed SubInspector gate checks **twice**",
                 "- Please discuss with **@Komal Saraogi** before making further changes",
-                "- Fix all ❌ checks above, then comment `si check` to retry",
+                "- Fix all ❌ checks above, then comment `/si check` to retry",
             ]
         else:
             lines += [
@@ -670,15 +669,14 @@ async def process_webhook(payload):
     if not task_id or not event:
         return
 
-    # Skip ALL events from the bot's own account to prevent loops.
-    # The bot posts comments using the same ClickUp account as the API key owner,
-    # so we cannot distinguish the bot's replies from the owner's manual comments
-    # by user ID alone. The owner should use a teammate's account to post "si check",
-    # or trigger re-evaluation by moving the ticket status.
-    if history_items:
+    # Skip taskStatusUpdated from the bot account to prevent revert loops.
+    # taskCommentPosted is NOT blanket-skipped: the trigger now requires a leading
+    # slash (/si check) which never appears in the bot's own comments, so there
+    # is no loop risk from comment events.
+    if event == "taskStatusUpdated" and history_items:
         actor_id = str((history_items[0].get("user") or {}).get("id", ""))
         if actor_id == BOT_USER_ID:
-            print(f"[AGENT] Skipping — action by bot account {actor_id}", flush=True)
+            print(f"[AGENT] Skipping — taskStatusUpdated from bot account", flush=True)
             return
 
     task = await fetch_task(task_id)
