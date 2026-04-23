@@ -714,11 +714,18 @@ async def process_webhook(payload):
         return
 
     result_match = re.search(r"RESULT:\s*(PASS|FAIL)", content, re.IGNORECASE)
-    score_match = re.search(r"SCORE:\s*(\d+)/6", content, re.IGNORECASE)
-
     result = result_match.group(1).upper() if result_match else "FAIL"
-    score = score_match.group(1) if score_match else "0"
-    passed = result == "PASS"
+
+    # Count actual ✅ PASS entries in the checks table rather than trusting
+    # the LLM's stated SCORE, which it occasionally miscounts.
+    checks_match = re.search(r"CHECKS:\n(.*?)(?=\nSUMMARY:|\nMASTER TICKET:|$)", content, re.DOTALL)
+    if checks_match:
+        score = str(checks_match.group(1).count("✅ PASS"))
+    else:
+        score_match = re.search(r"SCORE:\s*(\d+)/6", content, re.IGNORECASE)
+        score = score_match.group(1) if score_match else "0"
+
+    passed = int(score) == 6
 
     prior_failures = 0 if passed else await count_subinspector_failures(task_id, raw_comments=raw_comments)
     if not passed and prior_failures >= 2:
