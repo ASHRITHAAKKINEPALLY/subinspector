@@ -14,7 +14,7 @@ ENFORCEMENT_FOLDERS = os.environ.get("ENFORCEMENT_FOLDERS", "90165998786").split
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 CLICKUP_BASE = "https://api.clickup.com/api/v2"
 
-PRE_EXEC_STATUSES = ["backlog", "ready", "in progress", "in progess", "development", "code-review", "code review"]
+PRE_EXEC_STATUSES = ["ready", "in progress", "in progess", "development", "code-review", "code review"]
 CLOSURE_STATUSES = ["qa", "uat", "prod review", "prod-review", "complete", "done", "ready to close"]
 
 SYSTEM_PROMPT = """You are SubInspector, a strict ClickUp ticket quality gate enforcer for the Instant Hydration (IH) data engineering team.
@@ -591,7 +591,16 @@ async def process_webhook(payload):
         print(f"[AGENT] No gate matched — skipping", flush=True)
         return
 
-    content = await evaluate_gate(gate, task, tier_override=tier_override)
+    try:
+        content = await evaluate_gate(gate, task, tier_override=tier_override)
+    except Exception as e:
+        print(f"[AGENT] evaluate_gate failed: {e}", flush=True)
+        await post_comment(
+            task_id,
+            f"⚠️ SubInspector encountered an error while evaluating the {gate} gate and could not complete the check.\n\nError: `{e}`\n\nPlease retry by commenting `si check`, or contact the bot admin if the issue persists.",
+            reply_to_comment_id=trigger_comment_id
+        )
+        return
 
     result_match = re.search(r"RESULT:\s*(PASS|FAIL)", content, re.IGNORECASE)
     score_match = re.search(r"SCORE:\s*(\d+)/6", content, re.IGNORECASE)
