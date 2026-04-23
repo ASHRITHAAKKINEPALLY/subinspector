@@ -253,17 +253,22 @@ def determine_gate(event, status, history_items):
         comment_text = ""
         if history_items:
             item = history_items[0]
-            comment_obj = item.get("comment") or {}
+            # ClickUp may nest the comment object under "comment" or "data.comment"
+            comment_obj = (
+                item.get("comment")
+                or (item.get("data") or {}).get("comment")
+                or {}
+            )
             own_id    = comment_obj.get("id") or item.get("id") or None
             parent_id = comment_obj.get("parent") or None
             # If si check was posted as a sub-comment (reply), reply to the
             # parent thread so the response appears in the same thread.
             # If it was a top-level comment, reply directly to that comment.
             trigger_comment_id = parent_id or own_id
-            print(f"[AGENT] comment own_id={own_id} parent_id={parent_id} → reply_to={trigger_comment_id}", flush=True)
             comment_text = extract_comment_text(comment_obj)
             if not comment_text:
                 comment_text = extract_comment_text(item)
+            print(f"[AGENT] comment own_id={own_id} parent_id={parent_id} → reply_to={trigger_comment_id} | text={repr(comment_text[:80])}", flush=True)
 
         tier_override = None
         tier_match = re.search(r"tier\s*:\s*(T[123])", comment_text, re.IGNORECASE)
