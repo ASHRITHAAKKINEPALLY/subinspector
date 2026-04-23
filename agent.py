@@ -558,54 +558,65 @@ async def evaluate_gate(gate, task, tier_override=None):
 
     print(f"[AGENT] Sending to Groq — prompt size: {len(user_message)} chars", flush=True)
 
+    # Model cascade: prefer the capable 70b model; fall back to 8b-instant
+    # (3× higher TPM limit) if the 70b model is rate-limited.
+    MODELS = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
+
+    async def _call_groq(model: str) -> str:
+        """Try one model; raise on rate-limit or error."""
+        async with httpx.AsyncClient(timeout=60) as client:
+            response = await client.post(
+                GROQ_URL,
+                headers={
+                    "Authorization": f"Bearer {GROQ_API_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": model,
+                    "temperature": 0.1,
+                    "max_tokens": 2000,
+                    "messages": [
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": user_message}
+                    ]
+                }
+            )
+            if response.status_code == 429:
+                raise _RateLimitError(f"Groq rate limited on {model}")
+            try:
+                data = response.json()
+            except Exception:
+                raise ValueError(f"Groq non-JSON response (HTTP {response.status_code}): {response.text[:400]}")
+            if "choices" not in data:
+                raise ValueError(f"Groq error on {model} (HTTP {response.status_code}): {data}")
+            return data["choices"][0]["message"]["content"]
+
+    class _RateLimitError(Exception):
+        pass
+
     last_error = None
-    for attempt in range(3):
-        try:
-            async with httpx.AsyncClient(timeout=60) as client:
-                response = await client.post(
-                    GROQ_URL,
-                    headers={
-                        "Authorization": f"Bearer {GROQ_API_KEY}",
-                        "Content-Type": "application/json"
-                    },
-                    json={
-                        "model": "llama-3.3-70b-versatile",
-                        "temperature": 0.1,
-                        "max_tokens": 2000,
-                        "messages": [
-                            {"role": "system", "content": SYSTEM_PROMPT},
-                            {"role": "user", "content": user_message}
-                        ]
-                    }
-                )
-                # Rate limited — wait and retry
-                if response.status_code == 429:
-                    wait_sec = 15 * (attempt + 1)
-                    print(f"[AGENT] Groq rate limited (attempt {attempt+1}/3) — waiting {wait_sec}s", flush=True)
-                    await asyncio.sleep(wait_sec)
-                    last_error = ValueError(f"Groq rate limited after {attempt+1} attempts")
-                    continue
+    for model in MODELS:
+        for attempt in range(3):
+            try:
+                content = await _call_groq(model)
+                print(f"[AGENT] Groq OK — model={model} attempt={attempt+1}", flush=True)
+                return content, raw_comments
+            except _RateLimitError as e:
+                wait_sec = 20 * (attempt + 1)
+                print(f"[AGENT] {e} — waiting {wait_sec}s (attempt {attempt+1}/3)", flush=True)
+                last_error = e
+                await asyncio.sleep(wait_sec)
+            except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError) as e:
+                print(f"[AGENT] Groq network error on {model} attempt {attempt+1}: {e}", flush=True)
+                last_error = e
+                if attempt < 2:
+                    await asyncio.sleep(5)
+            except Exception as e:
+                print(f"[AGENT] Groq call failed on {model} attempt {attempt+1}: {e}", flush=True)
+                last_error = e
+                break  # non-retryable error on this model — try next model
 
-                # Parse JSON safely — Groq can return HTML on 5xx
-                try:
-                    data = response.json()
-                except Exception:
-                    raw_body = response.text[:500]
-                    raise ValueError(f"Groq non-JSON response (HTTP {response.status_code}): {raw_body}")
-
-                if "choices" not in data:
-                    raise ValueError(f"Groq error (HTTP {response.status_code}): {data}")
-
-                print(f"[AGENT] Groq responded OK (attempt {attempt+1})", flush=True)
-                return data["choices"][0]["message"]["content"], raw_comments
-
-        except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError) as e:
-            print(f"[AGENT] Groq network error (attempt {attempt+1}/3): {e}", flush=True)
-            last_error = e
-            if attempt < 2:
-                await asyncio.sleep(5)
-
-    raise last_error or ValueError("Groq failed after 3 attempts")
+    raise last_error or ValueError("Groq failed on all models")
 
 
 async def post_comment(task_id, comment, reply_to_comment_id=None):
