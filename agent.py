@@ -1,6 +1,11 @@
 import os
 import re
+import io
+import base64
 import httpx
+import pdfplumber
+import openpyxl
+from docx import Document
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 CLICKUP_API_KEY = os.environ.get("CLICKUP_API_KEY")
@@ -132,6 +137,72 @@ async def fetch_task(task_id):
         return response.json()
 
 
+async def read_attachment(url, filename):
+    """Download an attachment and extract its text content."""
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.get(url, headers={"Authorization": CLICKUP_API_KEY}, follow_redirects=True)
+            raw = resp.content
+            ext = filename.lower().split(".")[-1] if "." in filename else ""
+
+            # PDF
+            if ext == "pdf":
+                with pdfplumber.open(io.BytesIO(raw)) as pdf:
+                    text = "\n".join(p.extract_text() or "" for p in pdf.pages)
+                return f"[PDF: {filename}]\n{text[:3000]}"
+
+            # Excel
+            elif ext in ("xlsx", "xls"):
+                wb = openpyxl.load_workbook(io.BytesIO(raw), data_only=True)
+                lines = []
+                for sheet in wb.sheetnames:
+                    ws = wb[sheet]
+                    lines.append(f"Sheet: {sheet}")
+                    for row in ws.iter_rows(values_only=True):
+                        row_str = " | ".join(str(c) if c is not None else "" for c in row)
+                        if row_str.strip(" |"):
+                            lines.append(row_str)
+                return f"[Excel: {filename}]\n" + "\n".join(lines[:200])
+
+            # Word
+            elif ext in ("docx", "doc"):
+                doc = Document(io.BytesIO(raw))
+                text = "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+                return f"[Word: {filename}]\n{text[:3000]}"
+
+            # CSV / plain text
+            elif ext in ("csv", "txt", "md"):
+                return f"[{ext.upper()}: {filename}]\n{raw.decode('utf-8', errors='ignore')[:3000]}"
+
+            # Image — use Groq vision to describe
+            elif ext in ("png", "jpg", "jpeg", "gif", "webp"):
+                b64 = base64.b64encode(raw).decode()
+                mime = "image/png" if ext == "png" else "image/jpeg"
+                async with httpx.AsyncClient(timeout=30) as vc:
+                    vr = await vc.post(
+                        GROQ_URL,
+                        headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+                        json={
+                            "model": "meta-llama/llama-4-scout-17b-16e-instruct",
+                            "max_tokens": 500,
+                            "messages": [{
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": "Describe what this image shows in the context of a data/BI ticket. Include any numbers, charts, tables, or UI elements visible."},
+                                    {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
+                                ]
+                            }]
+                        }
+                    )
+                    desc = vr.json()["choices"][0]["message"]["content"]
+                return f"[Image: {filename}]\n{desc}"
+
+            else:
+                return f"[Attachment: {filename}] (unsupported format)"
+    except Exception as e:
+        return f"[Attachment: {filename}] (could not read: {e})"
+
+
 async def fetch_comments(task_id):
     async with httpx.AsyncClient(timeout=15) as client:
         response = await client.get(
@@ -156,9 +227,16 @@ async def evaluate_gate(gate, task):
     list_name = (task.get("list") or {}).get("name", "")
     folder_name = (task.get("folder") or {}).get("name", "")
 
-    # Fetch attachments info
+    # Fetch and read attachments
     attachments = task.get("attachments", [])
-    attachment_info = ", ".join(a.get("title", a.get("url", "")) for a in attachments) if attachments else "None"
+    attachment_contents = []
+    for a in attachments[:5]:  # limit to 5 attachments
+        url = a.get("url", "")
+        filename = a.get("title", a.get("file_name", "attachment"))
+        if url:
+            content = await read_attachment(url, filename)
+            attachment_contents.append(content)
+    attachment_info = "\n\n".join(attachment_contents) if attachment_contents else "None"
 
     # Fetch subtasks
     subtasks = task.get("subtasks", [])
