@@ -17,6 +17,19 @@ CLICKUP_BASE = "https://api.clickup.com/api/v2"
 PRE_EXEC_STATUSES = ["ready", "in progress", "in progess", "development", "code-review", "code review"]
 CLOSURE_STATUSES = ["qa", "uat", "prod review", "prod-review", "complete", "done", "ready to close"]
 
+# Trigger patterns — each must match as a standalone phrase, not inside another word.
+# \b ensures "check" ends as a complete word, so "subinspector checking" never matches.
+# "subinspector" alone only triggers when it is NOT followed by a continuation verb/word
+# (e.g. "subinspector checking is done" → no match; bare "subinspector" → match).
+_TRIGGER_PATTERNS = [
+    re.compile(r'\bsubinspector[ \t]+check\b', re.IGNORECASE),
+    re.compile(r'\bsi[ \t]+check\b',            re.IGNORECASE),
+    re.compile(r'\bsubinspector\b(?![ \t]+\w)',  re.IGNORECASE),
+]
+
+def _is_trigger(text: str) -> bool:
+    return any(p.search(text) for p in _TRIGGER_PATTERNS)
+
 SYSTEM_PROMPT = """You are SubInspector, a strict ClickUp ticket quality gate enforcer for the Instant Hydration (IH) data engineering team.
 
 Your job: evaluate tickets against a formal 6-point gate checklist. Score each check PASS or FAIL. A ticket only passes if it scores 6/6. Never use subjective phrasing — every decision must map to a clear PASS or FAIL rule.
@@ -250,8 +263,7 @@ def determine_gate(event, status, history_items):
         if tier_match:
             tier_override = tier_match.group(1).upper()
 
-        triggers = ["subinspector check", "subinspector", "si check"]
-        if any(t in comment_text.lower() for t in triggers):
+        if _is_trigger(comment_text):
             if any(s in status for s in PRE_EXEC_STATUSES):
                 return "PRE-EXECUTION", True, trigger_comment_id, tier_override
             elif any(s in status for s in CLOSURE_STATUSES):
