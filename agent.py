@@ -516,31 +516,47 @@ async def evaluate_gate(gate, task, tier_override=None):
 
 
 async def post_comment(task_id, comment, reply_to_comment_id=None):
-    """Post a comment on a task. If reply_to_comment_id is set, post as a reply inside that thread."""
+    """Post a comment on a task. If reply_to_comment_id is set, try to post as a reply inside
+    that thread first; if the reply API call fails for any reason, fall back to a top-level
+    comment so the message is never silently dropped."""
     async with httpx.AsyncClient(timeout=15) as client:
         if reply_to_comment_id:
-            # Reply inside the same thread where si check was triggered
-            await client.post(
-                f"{CLICKUP_BASE}/comment/{reply_to_comment_id}/reply",
-                headers={"Authorization": CLICKUP_API_KEY, "Content-Type": "application/json"},
-                json={"comment_text": comment}
-            )
+            try:
+                resp = await client.post(
+                    f"{CLICKUP_BASE}/comment/{reply_to_comment_id}/reply",
+                    headers={"Authorization": CLICKUP_API_KEY, "Content-Type": "application/json"},
+                    json={"comment_text": comment}
+                )
+                if resp.status_code < 300:
+                    print(f"[AGENT] Reply posted to comment {reply_to_comment_id} (status {resp.status_code})", flush=True)
+                    return
+                print(f"[AGENT] Reply failed ({resp.status_code}) — falling back to top-level comment", flush=True)
+            except Exception as e:
+                print(f"[AGENT] Reply exception ({e}) — falling back to top-level comment", flush=True)
+
+        # Post as a top-level comment (either no reply_to_comment_id, or reply failed above)
+        resp = await client.post(
+            f"{CLICKUP_BASE}/task/{task_id}/comment",
+            headers={"Authorization": CLICKUP_API_KEY, "Content-Type": "application/json"},
+            json={"comment_text": comment}
+        )
+        if resp.status_code < 300:
+            print(f"[AGENT] Top-level comment posted on task {task_id} (status {resp.status_code})", flush=True)
         else:
-            # Fallback: top-level comment on the task
-            await client.post(
-                f"{CLICKUP_BASE}/task/{task_id}/comment",
-                headers={"Authorization": CLICKUP_API_KEY, "Content-Type": "application/json"},
-                json={"comment_text": comment}
-            )
+            print(f"[AGENT] ⚠️ Top-level comment also failed ({resp.status_code}): {resp.text[:200]}", flush=True)
 
 
 async def revert_status(task_id, status):
     async with httpx.AsyncClient(timeout=15) as client:
-        await client.put(
+        resp = await client.put(
             f"{CLICKUP_BASE}/task/{task_id}",
             headers={"Authorization": CLICKUP_API_KEY, "Content-Type": "application/json"},
             json={"status": status}
         )
+        if resp.status_code < 300:
+            print(f"[AGENT] Status reverted to '{status}' on task {task_id} (status {resp.status_code})", flush=True)
+        else:
+            print(f"[AGENT] ⚠️ Revert failed ({resp.status_code}): {resp.text[:200]}", flush=True)
 
 
 def format_comment(gate, content, score, passed, prior_failures=0, reverted_to=None):
