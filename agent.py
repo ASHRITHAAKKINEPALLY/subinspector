@@ -451,16 +451,30 @@ async def evaluate_gate(gate, task, tier_override=None):
     subtask_info_capped    = subtask_info[:1500]
 
     is_master = subtask_count > 0
+
+    # Detect BI tickets in Python so the LLM doesn't have to guess
+    task_name = task.get("name", "")
+    bi_keywords = ["tableau", "power bi", "powerbi", "pbix", "dashboard", "workbook", "report"]
+    is_bi = (
+        task_name.lower().startswith("[bi]")
+        or any(kw in task_name.lower() for kw in bi_keywords)
+        or any(kw in (task.get("description") or "").lower()[:500] for kw in bi_keywords)
+    )
+    bi_line = "Ticket Type: BI — use the BI-specific checklist, NOT the generic checklist.\n" if is_bi else "Ticket Type: DE (non-BI) — use the generic checklist.\n"
+    print(f"[AGENT] BI detected: {is_bi}", flush=True)
+
     tier_line = f"Tier Override: {tier_override} (use this tier — do not infer)\n" if tier_override else ""
     user_message = (
         f"Gate: {gate}\n"
+        f"{bi_line}"
         f"{tier_line}"
-        f"Task: {task.get('name', '')}\n"
+        f"Task: {task_name}\n"
         f"Status: {(task.get('status') or {}).get('status', '')}\n"
         f"Assignees: {assignees}\n"
         f"List: {list_name}\n"
         f"Folder: {folder_name}\n"
         f"Is Master Ticket: {'YES — has ' + str(subtask_count) + ' subtasks' if is_master else 'NO'}\n"
+        f"NOTE: [table-embed:...] markers in the description are embedded data tables and count as evidence.\n"
         f"Description:\n{description}\n\n"
         f"Comments (closing notes, QA sign-offs, evidence, sub-comments):\n{comments_text_capped}\n\n"
         f"Attachments (actual content read):\n{attachment_info_capped}\n\n"
