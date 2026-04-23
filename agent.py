@@ -261,16 +261,14 @@ def determine_gate(event, status, history_items):
                 or (item.get("data") or {}).get("comment")
                 or {}
             )
-            own_id    = comment_obj.get("id") or item.get("id") or None
-            parent_id = comment_obj.get("parent") or None
+            own_id    = (comment_obj.get("id") if isinstance(comment_obj, dict) else None) or item.get("id") or None
+            parent_id = (comment_obj.get("parent") if isinstance(comment_obj, dict) else None) or None
             # If si check was posted as a sub-comment (reply), reply to the
             # parent thread so the response appears in the same thread.
             # If it was a top-level comment, reply directly to that comment.
             trigger_comment_id = parent_id or own_id
-            comment_text = extract_comment_text(comment_obj)
-            if not comment_text:
-                comment_text = extract_comment_text(item)
-            print(f"[AGENT] comment own_id={own_id} parent_id={parent_id} → reply_to={trigger_comment_id} | text={repr(comment_text[:80])}", flush=True)
+            comment_text = extract_comment_text(comment_obj) or extract_comment_text(item) or ""
+            print(f"[AGENT] determine_gate: own_id={own_id} parent_id={parent_id} → reply_to={trigger_comment_id} | text={repr(comment_text[:80])}", flush=True)
 
         tier_override = None
         tier_match = re.search(r"tier\s*:\s*(T[123])", comment_text, re.IGNORECASE)
@@ -284,6 +282,8 @@ def determine_gate(event, status, history_items):
                 return "CLOSURE", True, trigger_comment_id, tier_override
             else:
                 return "INTAKE", True, trigger_comment_id, tier_override
+        else:
+            print(f"[AGENT] determine_gate: no trigger found in comment text={repr(comment_text[:80])}", flush=True)
 
     return None, False, None, None
 
@@ -746,6 +746,24 @@ async def count_subinspector_failures(task_id, raw_comments=None):
         return 0
 
 
+async def fetch_comment_text_from_api(comment_id: str) -> str:
+    """Fetch a single comment's text directly from the ClickUp API as a fallback."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                f"{CLICKUP_BASE}/comment/{comment_id}",
+                headers={"Authorization": CLICKUP_API_KEY}
+            )
+            if resp.status_code == 200:
+                body = resp.json()
+                text = extract_comment_text(body) or extract_comment_text(body.get("comment") or {})
+                if text:
+                    return text
+    except Exception as e:
+        print(f"[AGENT] fetch_comment_text_from_api({comment_id}) failed: {e}", flush=True)
+    return ""
+
+
 async def process_webhook(payload):
     event = payload.get("event")
     task_id = payload.get("task_id")
@@ -753,6 +771,15 @@ async def process_webhook(payload):
 
     if not task_id or not event:
         return
+
+    print(f"[AGENT] Webhook: event={event} task_id={task_id} history_items_count={len(history_items)}", flush=True)
+    if history_items:
+        # Log structure so we can debug comment text extraction misses
+        import json
+        sample = history_items[0]
+        print(f"[AGENT] history_items[0] keys={list(sample.keys())}", flush=True)
+        comment_preview = sample.get("comment") or (sample.get("data") or {}).get("comment") or {}
+        print(f"[AGENT] comment_obj keys={list(comment_preview.keys()) if isinstance(comment_preview, dict) else type(comment_preview)}", flush=True)
 
     # Bot-account loop prevention — two cases:
     # 1. taskStatusUpdated from bot → always skip (prevents revert → re-evaluate loop)
@@ -775,10 +802,24 @@ async def process_webhook(payload):
                     or {}
                 )
                 raw_text = (extract_comment_text(comment_obj) or extract_comment_text(item) or "").strip()
-                # Only allow through if it looks like a human-typed trigger (short + matches pattern)
-                if not (_is_trigger(raw_text) and len(raw_text) <= 100):
+
+                # If text extraction from webhook payload failed, try fetching via API
+                if not raw_text:
+                    comment_id = (comment_obj.get("id") if isinstance(comment_obj, dict) else None) or item.get("id") or ""
+                    if comment_id:
+                        print(f"[AGENT] Text extraction from payload failed — fetching comment {comment_id} from API", flush=True)
+                        raw_text = await fetch_comment_text_from_api(comment_id)
+
+                print(f"[AGENT] Bot-account comment text: {repr(raw_text[:120])}", flush=True)
+
+                # Only skip if we have text AND it's NOT a short trigger.
+                # If text is empty (extraction failed entirely), let it through —
+                # determine_gate will check for trigger and gate=None → skip safely.
+                if raw_text and not (_is_trigger(raw_text) and len(raw_text) <= 100):
                     print(f"[AGENT] Skipping — bot account comment (len={len(raw_text)})", flush=True)
                     return
+                elif not raw_text:
+                    print(f"[AGENT] Bot account comment — could not extract text, letting through to determine_gate", flush=True)
 
     try:
         task = await fetch_task(task_id)
