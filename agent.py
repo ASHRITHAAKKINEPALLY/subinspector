@@ -299,7 +299,11 @@ async def read_attachment(url, filename):
     """Download an attachment and extract its text content."""
     try:
         async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.get(url, headers={"Authorization": CLICKUP_API_KEY}, follow_redirects=True)
+            # ClickUp attachment URLs are pre-signed CDN links — try without auth first
+            resp = await client.get(url, follow_redirects=True)
+            if resp.status_code in (401, 403):
+                resp = await client.get(url, headers={"Authorization": CLICKUP_API_KEY}, follow_redirects=True)
+            print(f"[AGENT] Download {filename}: status={resp.status_code} size={len(resp.content)}", flush=True)
             raw = resp.content
             ext = filename.lower().split(".")[-1] if "." in filename else ""
 
@@ -435,12 +439,14 @@ async def evaluate_gate(gate, task, tier_override=None):
 
     # Fetch and read attachments
     attachments = task.get("attachments", [])
+    print(f"[AGENT] Attachments found: {len(attachments)} — {[a.get('title', a.get('file_name','?')) for a in attachments]}", flush=True)
     attachment_contents = []
     for a in attachments[:5]:  # limit to 5 attachments
         url = a.get("url", "")
         filename = a.get("title", a.get("file_name", "attachment"))
         if url:
             content = await read_attachment(url, filename)
+            print(f"[AGENT] Attachment read: {filename} → {content[:80]}", flush=True)
             attachment_contents.append(content)
     attachment_info = "\n\n".join(attachment_contents) if attachment_contents else "None"
 
