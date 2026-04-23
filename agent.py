@@ -558,19 +558,14 @@ async def evaluate_gate(gate, task, tier_override=None):
 
     print(f"[AGENT] Sending to Groq — prompt size: {len(user_message)} chars", flush=True)
 
-    # Model cascade: prefer the capable 70b model; fall back to 8b-instant
-    # (3× higher TPM limit) if the 70b model is rate-limited.
-    MODELS = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
+    class _RateLimitError(Exception):
+        pass
 
     async def _call_groq(model: str) -> str:
-        """Try one model; raise on rate-limit or error."""
         async with httpx.AsyncClient(timeout=60) as client:
             response = await client.post(
                 GROQ_URL,
-                headers={
-                    "Authorization": f"Bearer {GROQ_API_KEY}",
-                    "Content-Type": "application/json"
-                },
+                headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
                 json={
                     "model": model,
                     "temperature": 0.1,
@@ -582,39 +577,54 @@ async def evaluate_gate(gate, task, tier_override=None):
                 }
             )
             if response.status_code == 429:
-                raise _RateLimitError(f"Groq rate limited on {model}")
+                raise _RateLimitError(f"rate limited on {model}")
             try:
                 data = response.json()
             except Exception:
-                raise ValueError(f"Groq non-JSON response (HTTP {response.status_code}): {response.text[:400]}")
+                raise ValueError(f"non-JSON response (HTTP {response.status_code}): {response.text[:400]}")
             if "choices" not in data:
                 raise ValueError(f"Groq error on {model} (HTTP {response.status_code}): {data}")
             return data["choices"][0]["message"]["content"]
 
-    class _RateLimitError(Exception):
-        pass
-
+    # Strategy:
+    # 1. Try llama-3.3-70b-versatile once — best quality, but strict rate limit (6k TPM free).
+    # 2. On rate limit → immediately fall back to llama-3.1-8b-instant (20k TPM, no wait).
+    # 3. Retry 8b-instant up to 3× with short waits if needed.
     last_error = None
-    for model in MODELS:
-        for attempt in range(3):
-            try:
-                content = await _call_groq(model)
-                print(f"[AGENT] Groq OK — model={model} attempt={attempt+1}", flush=True)
-                return content, raw_comments
-            except _RateLimitError as e:
-                wait_sec = 20 * (attempt + 1)
-                print(f"[AGENT] {e} — waiting {wait_sec}s (attempt {attempt+1}/3)", flush=True)
-                last_error = e
-                await asyncio.sleep(wait_sec)
-            except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError) as e:
-                print(f"[AGENT] Groq network error on {model} attempt {attempt+1}: {e}", flush=True)
-                last_error = e
-                if attempt < 2:
-                    await asyncio.sleep(5)
-            except Exception as e:
-                print(f"[AGENT] Groq call failed on {model} attempt {attempt+1}: {e}", flush=True)
-                last_error = e
-                break  # non-retryable error on this model — try next model
+    primary, fallback = "llama-3.3-70b-versatile", "llama-3.1-8b-instant"
+
+    try:
+        content = await _call_groq(primary)
+        print(f"[AGENT] Groq OK — model={primary}", flush=True)
+        return content, raw_comments
+    except _RateLimitError as e:
+        print(f"[AGENT] {primary} rate limited — switching to {fallback} immediately", flush=True)
+        last_error = e
+    except (httpx.TimeoutException, httpx.ConnectError) as e:
+        print(f"[AGENT] {primary} network error: {e} — switching to {fallback}", flush=True)
+        last_error = e
+    except Exception as e:
+        print(f"[AGENT] {primary} failed: {e} — switching to {fallback}", flush=True)
+        last_error = e
+
+    for attempt in range(3):
+        try:
+            content = await _call_groq(fallback)
+            print(f"[AGENT] Groq OK — model={fallback} attempt={attempt+1}", flush=True)
+            return content, raw_comments
+        except _RateLimitError as e:
+            wait_sec = 20 * (attempt + 1)
+            print(f"[AGENT] {fallback} rate limited (attempt {attempt+1}/3) — waiting {wait_sec}s", flush=True)
+            last_error = e
+            await asyncio.sleep(wait_sec)
+        except (httpx.TimeoutException, httpx.ConnectError) as e:
+            print(f"[AGENT] {fallback} network error attempt {attempt+1}: {e}", flush=True)
+            last_error = e
+            await asyncio.sleep(5)
+        except Exception as e:
+            print(f"[AGENT] {fallback} failed attempt {attempt+1}: {e}", flush=True)
+            last_error = e
+            await asyncio.sleep(5)
 
     raise last_error or ValueError("Groq failed on all models")
 
