@@ -211,16 +211,35 @@ def determine_gate(event, status, history_items):
 
 
 async def fetch_task(task_id):
-    async with httpx.AsyncClient(timeout=20) as client:
-        response = await client.get(
-            f"{CLICKUP_BASE}/task/{task_id}",
-            headers={"Authorization": CLICKUP_API_KEY},
-            params={"include_subtasks": "true"}
-        )
-        data = response.json()
-        if response.status_code >= 400 or "err" in data or not data.get("id"):
-            raise ValueError(f"ClickUp task fetch failed (HTTP {response.status_code}): {str(data)[:300]}")
-        return data
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                response = await client.get(
+                    f"{CLICKUP_BASE}/task/{task_id}",
+                    headers={"Authorization": CLICKUP_API_KEY},
+                    params={"include_subtasks": "true"}
+                )
+                raw = response.text
+                if not raw or not raw.strip():
+                    print(f"[AGENT] fetch_task attempt {attempt+1}: empty response (HTTP {response.status_code})", flush=True)
+                    if attempt < 2:
+                        await asyncio.sleep(3)
+                        continue
+                    raise ValueError(f"ClickUp returned empty response after 3 attempts (HTTP {response.status_code})")
+                try:
+                    data = response.json()
+                except Exception:
+                    raise ValueError(f"ClickUp non-JSON response (HTTP {response.status_code}): {raw[:200]}")
+                if response.status_code >= 400 or "err" in data or not data.get("id"):
+                    raise ValueError(f"ClickUp task fetch failed (HTTP {response.status_code}): {str(data)[:300]}")
+                return data
+        except (httpx.TimeoutException, httpx.ConnectError) as e:
+            print(f"[AGENT] fetch_task network error attempt {attempt+1}: {e}", flush=True)
+            if attempt < 2:
+                await asyncio.sleep(3)
+            else:
+                raise
+    raise ValueError(f"fetch_task failed after 3 attempts for {task_id}")
 
 
 async def read_attachment(url, filename):
