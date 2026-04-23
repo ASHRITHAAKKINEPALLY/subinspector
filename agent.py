@@ -25,6 +25,24 @@ Your job: evaluate tickets against a formal 6-point gate checklist. Score each c
 
 IH TEAM CONTEXT (use this to make smarter decisions):
 
+TICKET TIER CLASSIFICATION — determine tier before scoring:
+- T1 — Lightweight: Label fix, filter change, config tweak, simple display correction. No structural or logic change. Light gate — description + success criteria sufficient. Feasibility Assessment = PASS for T1 if task is self-evident and low-risk.
+- T2 — Standard: Analysis task, moderate modeling, enhancement, metric mismatch + EDM fix. All 6 BA Inputs required. Feasibility Assessment required.
+- T3 — Critical: Title/description contains keywords like "dashboard / dataset / model / client / logic / allocation" AND involves a new build or significant rework. Full gate — all 6 BA Inputs + feasibility assessment mandatory. Any TBD = FAIL.
+
+SIMPLE DISCREPANCY BUGS (Bug Category = Logic Misalignment OR title contains "discrepancy/mismatch/incorrect"):
+For a pure metric discrepancy with no logic change, the minimum acceptable INTAKE requires only:
+1. Plain-language description of the mismatch (what number appears vs. what is expected).
+2. Affected metric explicitly named.
+3. One concrete validation check stated.
+No full BA Input set or detailed edge cases required for simple discrepancies.
+
+BUSINESS CONTEXT REQUIREMENT — all non-trivial tickets must include all 3 elements:
+1. Rationale/Justification — WHY the change is needed (concrete business driver; NOT "requested by X" or "Komal asked for this").
+2. Impact Statement — WHAT will improve and for WHOM (e.g., "reduces reconciliation time for finance team by 80%").
+3. Enabled Use Cases — WHAT downstream workflows or decisions this enables.
+FAIL the relevant BA Inputs check if any of these 3 elements are absent or vague.
+
 TICKET TYPES at Instant Hydration:
 - New SKU Onboarding — adding a new product/SKU to the data pipeline. These always follow a structured scope pattern with subtasks per SKU (e.g., "New SKU Addition - Master Ticket" with scope covering: product master update, product_name_mapped logic, Tableau dashboard visibility, end-to-end validation). Master tickets for onboarding typically have one subtask per SKU being onboarded.
 - Bug Fix — data discrepancy, logic misalignment, or connector/pipeline bug. These use the Bug Category custom field.
@@ -504,6 +522,27 @@ async def revert_status(task_id, status):
         )
 
 
+async def count_subinspector_failures(task_id):
+    """Count prior SubInspector FAIL comments on this ticket for the anti-loop safeguard."""
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(
+                f"{CLICKUP_BASE}/task/{task_id}/comment",
+                headers={"Authorization": CLICKUP_API_KEY}
+            )
+            comments = resp.json().get("comments", [])
+            count = 0
+            for c in comments:
+                text = extract_comment_text(c)
+                if ("gate failed" in text.lower() or "gate check" in text.lower()) and (
+                    "❌" in text or "FAIL" in text.upper()
+                ):
+                    count += 1
+            return count
+    except Exception:
+        return 0
+
+
 async def process_webhook(payload):
     event = payload.get("event")
     task_id = payload.get("task_id")
@@ -546,7 +585,25 @@ async def process_webhook(payload):
     if passed:
         comment = f"✅ {gate} Gate Passed — {score}/6 checks passed.\n\n{content}"
     else:
-        comment = f"❌ {gate} Gate Failed — {score}/6 checks passed.\n\n{content}"
+        # Anti-loop safeguard: count prior FAIL comments from SubInspector
+        prior_failures = await count_subinspector_failures(task_id)
+        if prior_failures == 0:
+            comment = f"❌ {gate} Gate Failed — {score}/6 checks passed.\n\n{content}"
+        elif prior_failures == 1:
+            comment = (
+                f"❌ {gate} Gate Failed (2nd attempt) — {score}/6 checks passed.\n\n{content}\n\n"
+                f"⚠️ This ticket has failed gate checks twice. "
+                f"Please consult @Komal Saraogi (BA Lead) before resubmitting."
+            )
+        else:
+            # 3rd+ failure — escalate, do not keep repeating the same block
+            comment = (
+                f"🚨 {gate} Gate — Repeated Failures ({prior_failures + 1} total)\n\n{content}\n\n"
+                f"@Komal Saraogi — This ticket has failed SubInspector gate checks "
+                f"{prior_failures + 1} times. Automatic enforcement suspended. "
+                f"Manual review required before this ticket can proceed."
+            )
+            print(f"[AGENT] Anti-loop triggered after {prior_failures + 1} failures — escalating to BA lead", flush=True)
 
     # Reply in the same thread where si check was posted
     await post_comment(task_id, comment, reply_to_comment_id=trigger_comment_id)
