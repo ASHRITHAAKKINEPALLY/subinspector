@@ -65,7 +65,7 @@ Treat a ticket as a BI ticket when the title/description/list clearly refers to 
 ---
 
 INTAKE GATE — Generic (6 checks):
-1. Problem Statement — PASS only if a clear problem statement or user story is present, names the affected area/metric, and includes a value-realization signal (why it matters). FAIL if missing, vague, or no "so that" / business value stated.
+1. Title–Description Coherence & Problem Statement — PASS only if: (a) the ticket title and the problem statement describe the SAME entity/feature/system — flag any mismatch even if the words are related (e.g., title says "Subscription" but problem statement is about "Subscribers" = FAIL — these are different entities); AND (b) a clear problem statement is present that names the affected area/metric and includes a value-realization signal (why it matters). FAIL if either condition fails.
 2. Steps to Reproduce / Context — PASS only if a new person can understand the issue without a meeting: navigation path, filters/date range, what to look at, or relevant business context. FAIL if absent or relies on private knowledge.
 3. Definition of Done — PASS only if the ticket states an explicit, observable end state (what "done" looks like). FAIL if vague ("fix it", "resolve") or non-measurable.
 4. Screenshots/Evidence — PASS only if evidence is attached or linked sufficient to verify the starting state. FAIL if missing when the claim depends on UI/output differences. NOTE: Attachments are read — check attachment contents, not just file names.
@@ -198,6 +198,10 @@ def extract_text_from_comment_obj(obj):
 def determine_gate(event, status, history_items):
     """Returns (gate, is_dry_run, trigger_comment_id)."""
     status = status.lower()
+
+    # Auto-check every new ticket at creation time
+    if event == "taskCreated":
+        return "INTAKE", False, None
 
     if event == "taskCommentPosted":
         trigger_comment_id = None
