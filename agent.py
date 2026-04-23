@@ -197,7 +197,9 @@ async def process_webhook(payload):
     task = await fetch_task(task_id)
 
     folder_id = str((task.get("folder") or {}).get("id", ""))
+    print(f"[AGENT] Folder ID: {folder_id} | In scope: {folder_id in ENFORCEMENT_FOLDERS}", flush=True)
     if folder_id not in ENFORCEMENT_FOLDERS:
+        print(f"[AGENT] Skipping — not in scope", flush=True)
         return
 
     status = (task.get("status") or {}).get("status", "")
@@ -208,8 +210,10 @@ async def process_webhook(payload):
     previous_status = previous_status or "backlog"
 
     gate, is_dry_run = determine_gate(event, status, history_items)
+    print(f"[AGENT] Gate: {gate} | Status: {status}", flush=True)
 
     if not gate:
+        print(f"[AGENT] No gate matched — skipping", flush=True)
         return
 
     content = await evaluate_gate(gate, task)
