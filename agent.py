@@ -203,8 +203,27 @@ async def read_attachment(url, filename):
         return f"[Attachment: {filename}] (could not read: {e})"
 
 
+async def fetch_threaded_replies(comment_id, client):
+    """Fetch all replies under a comment thread."""
+    try:
+        resp = await client.get(
+            f"{CLICKUP_BASE}/comment/{comment_id}/reply",
+            headers={"Authorization": CLICKUP_API_KEY}
+        )
+        replies = resp.json().get("comments", [])
+        lines = []
+        for r in replies:
+            user = (r.get("user") or {}).get("username", "unknown")
+            text = r.get("comment_text", "").strip()
+            if text:
+                lines.append(f"    ↳ [{user}]: {text}")
+        return lines
+    except Exception:
+        return []
+
+
 async def fetch_comments(task_id):
-    async with httpx.AsyncClient(timeout=15) as client:
+    async with httpx.AsyncClient(timeout=20) as client:
         response = await client.get(
             f"{CLICKUP_BASE}/task/{task_id}/comment",
             headers={"Authorization": CLICKUP_API_KEY}
@@ -214,10 +233,15 @@ async def fetch_comments(task_id):
         lines = []
         for c in comments:
             user = (c.get("user") or {}).get("username", "unknown")
-            text = c.get("comment_text", "")
-            if text and text.strip():
-                lines.append(f"- [{user}]: {text.strip()}")
-        return "\n".join(lines[:30]) if lines else "None"
+            text = c.get("comment_text", "").strip()
+            comment_id = c.get("id", "")
+            if text:
+                lines.append(f"- [{user}]: {text}")
+            # Fetch threaded replies under this comment
+            if comment_id:
+                replies = await fetch_threaded_replies(comment_id, client)
+                lines.extend(replies)
+        return "\n".join(lines) if lines else "None"
 
 
 async def evaluate_gate(gate, task):
