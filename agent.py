@@ -87,6 +87,42 @@ CLOSURE GATE — BI Tickets (6 checks):
 
 SCORING: Count PASS items. Pass = 6/6. Below 6/6 = FAIL.
 
+---
+
+MASTER TICKET DETECTION & SCOPE COVERAGE CHECK:
+
+A ticket is a MASTER TICKET if any of these are true:
+- It has subtasks listed under it
+- Its title or description uses words like "master", "epic", "initiative", "phase", "rollout", "project", "tracker"
+- Its description contains a list of deliverables, workstreams, or child work items
+
+If the ticket IS a master ticket, perform an additional scope coverage analysis AFTER the 6-point gate check:
+
+1. Parse the scope from the description — extract every distinct deliverable, workstream, feature, or task area mentioned.
+2. Compare each scope item against the existing subtasks (by name, description, and status).
+3. Identify gaps — scope items that have NO matching subtask.
+4. Identify partial coverage — scope items that have a subtask but the subtask is too vague or too broad to fully cover the scope item.
+
+Then append a MASTER TICKET SCOPE ANALYSIS section to your response with this format:
+
+MASTER TICKET: YES
+SCOPE ITEMS FOUND: [comma-separated list of scope items parsed from description]
+SUBTASK COVERAGE:
+| Scope Item | Covered By | Status |
+|---|---|---|
+| [scope item] | [subtask name or "❌ No subtask"] | [subtask status or "⚠️ MISSING"] |
+SCOPE WARNINGS:
+- ⚠️ [scope item] — no subtask exists for this. Recommend creating: "[suggested subtask name]"
+- ⚠️ [scope item] — subtask exists but too broad to confirm full coverage
+SCOPE VERDICT: [FULLY COVERED / PARTIALLY COVERED / GAPS FOUND]
+
+If no gaps: write "SCOPE VERDICT: FULLY COVERED — all scope items have corresponding subtasks."
+If gaps exist: write "SCOPE VERDICT: GAPS FOUND — X scope items have no subtask. Review and create missing subtasks before execution."
+
+If the ticket is NOT a master ticket, skip this section entirely.
+
+---
+
 RESPONSE FORMAT — respond ONLY in this exact format:
 RESULT: PASS or FAIL
 SCORE: X/6
@@ -99,7 +135,9 @@ CHECKS:
 | 4 | [Check name] | ✅ PASS or ❌ FAIL | [one-line detail] |
 | 5 | [Check name] | ✅ PASS or ❌ FAIL | [one-line detail] |
 | 6 | [Check name] | ✅ PASS or ❌ FAIL | [one-line detail] |
-SUMMARY: [one sentence stating overall verdict and the most critical gap if FAIL]"""
+SUMMARY: [one sentence stating overall verdict and the most critical gap if FAIL]
+
+[MASTER TICKET SCOPE ANALYSIS section here if applicable]"""
 
 
 def extract_text_from_comment_obj(obj):
@@ -314,12 +352,30 @@ async def evaluate_gate(gate, task):
             attachment_contents.append(content)
     attachment_info = "\n\n".join(attachment_contents) if attachment_contents else "None"
 
-    # Fetch subtasks
-    subtasks = task.get("subtasks", [])
-    subtask_info = "\n".join(
-        f"- {s.get('name','')} [{(s.get('status') or {}).get('status','unknown')}]"
-        for s in subtasks
-    ) if subtasks else "None"
+    # Fetch each subtask individually for full details (name, description, status, assignees)
+    subtask_stubs = task.get("subtasks", [])
+    subtask_lines = []
+    async with httpx.AsyncClient(timeout=15) as st_client:
+        for stub in subtask_stubs:
+            st_id = stub.get("id", "")
+            try:
+                st_resp = await st_client.get(
+                    f"{CLICKUP_BASE}/task/{st_id}",
+                    headers={"Authorization": CLICKUP_API_KEY}
+                )
+                s = st_resp.json()
+            except Exception:
+                s = stub
+            name = s.get("name", "")
+            status = (s.get("status") or {}).get("status", "unknown")
+            desc = (s.get("description") or "").strip()[:500]
+            assignees_s = ", ".join(a.get("username", "") for a in (s.get("assignees") or [])) or "unassigned"
+            line = f"- [{status}] {name} (assignee: {assignees_s})"
+            if desc:
+                line += f"\n  Scope: {desc}"
+            subtask_lines.append(line)
+    subtask_info = "\n".join(subtask_lines) if subtask_lines else "None (no subtasks)"
+    subtask_count = len(subtask_stubs)
 
     # Fetch custom fields
     custom_fields = task.get("custom_fields", [])
@@ -334,6 +390,7 @@ async def evaluate_gate(gate, task):
     # Fetch comments (closing notes, QA sign-offs, evidence links etc.)
     comments_text = await fetch_comments(task_id)
 
+    is_master = subtask_count > 0
     user_message = (
         f"Gate: {gate}\n"
         f"Task: {task.get('name', '')}\n"
@@ -341,10 +398,11 @@ async def evaluate_gate(gate, task):
         f"Assignees: {assignees}\n"
         f"List: {list_name}\n"
         f"Folder: {folder_name}\n"
+        f"Is Master Ticket: {'YES — has ' + str(subtask_count) + ' subtasks' if is_master else 'NO'}\n"
         f"Description:\n{description}\n\n"
-        f"Comments (includes closing notes, QA sign-offs, evidence):\n{comments_text}\n\n"
-        f"Attachments: {attachment_info}\n\n"
-        f"Subtasks:\n{subtask_info}\n\n"
+        f"Comments (closing notes, QA sign-offs, evidence, sub-comments):\n{comments_text}\n\n"
+        f"Attachments (actual content read):\n{attachment_info}\n\n"
+        f"Subtasks ({subtask_count} total — full details):\n{subtask_info}\n\n"
         f"Custom Fields:\n{custom_fields_info}"
     )
 
