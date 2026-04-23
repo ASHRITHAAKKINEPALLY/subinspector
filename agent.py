@@ -108,12 +108,23 @@ def determine_gate(event, status, history_items):
     if event == "taskCommentPosted":
         comment_text = ""
         if history_items:
-            comment = history_items[0].get("comment", {}) or {}
+            item = history_items[0]
+            comment = item.get("comment", {}) or {}
+            # Try all possible locations ClickUp puts comment text
+            # Rich text blocks
             comment_items = comment.get("comment", []) or []
             if comment_items:
-                comment_text = comment_items[0].get("text", "") or ""
+                comment_text = " ".join(
+                    (b.get("text") or "") for b in comment_items if isinstance(b, dict)
+                ).strip()
+            # Plain text fallback
             if not comment_text:
                 comment_text = comment.get("text_content", "") or ""
+            if not comment_text:
+                comment_text = comment.get("comment_text", "") or ""
+            # Sub-comment: text may be directly on history_items
+            if not comment_text:
+                comment_text = item.get("comment_text", "") or ""
         comment_text = comment_text.lower()
         triggers = ["subinspector check", "subinspector", "si check"]
         if any(t in comment_text for t in triggers):
@@ -203,43 +214,67 @@ async def read_attachment(url, filename):
         return f"[Attachment: {filename}] (could not read: {e})"
 
 
-async def fetch_threaded_replies(comment_id, client):
-    """Fetch all replies under a comment thread."""
+def extract_comment_text(comment_obj):
+    """Extract plain text from a ClickUp comment object.
+    Handles both comment_text (plain) and comment[] (rich text blocks)."""
+    # Try plain text first
+    text = (comment_obj.get("comment_text") or "").strip()
+    if text:
+        return text
+    # Fall back to rich text blocks
+    blocks = comment_obj.get("comment") or []
+    parts = []
+    for block in blocks:
+        if isinstance(block, dict):
+            t = (block.get("text") or "").strip()
+            if t:
+                parts.append(t)
+    return " ".join(parts).strip()
+
+
+async def fetch_all_replies(comment_id, client, depth=1):
+    """Recursively fetch all sub-comments at any depth."""
+    indent = "  " * depth
+    lines = []
     try:
         resp = await client.get(
             f"{CLICKUP_BASE}/comment/{comment_id}/reply",
             headers={"Authorization": CLICKUP_API_KEY}
         )
         replies = resp.json().get("comments", [])
-        lines = []
         for r in replies:
             user = (r.get("user") or {}).get("username", "unknown")
-            text = r.get("comment_text", "").strip()
+            text = extract_comment_text(r)
+            reply_id = r.get("id", "")
             if text:
-                lines.append(f"    ↳ [{user}]: {text}")
-        return lines
+                lines.append(f"{indent}↳ [{user}]: {text}")
+            # Recurse into sub-sub-comments
+            if reply_id:
+                sub_replies = await fetch_all_replies(reply_id, client, depth + 1)
+                lines.extend(sub_replies)
     except Exception:
-        return []
+        pass
+    return lines
 
 
 async def fetch_comments(task_id):
-    async with httpx.AsyncClient(timeout=20) as client:
+    """Fetch all comments and their full sub-comment trees."""
+    async with httpx.AsyncClient(timeout=30) as client:
         response = await client.get(
             f"{CLICKUP_BASE}/task/{task_id}/comment",
             headers={"Authorization": CLICKUP_API_KEY}
         )
-        data = response.json()
-        comments = data.get("comments", [])
+        comments = response.json().get("comments", [])
         lines = []
         for c in comments:
             user = (c.get("user") or {}).get("username", "unknown")
-            text = c.get("comment_text", "").strip()
+            text = extract_comment_text(c)
             comment_id = c.get("id", "")
             if text:
-                lines.append(f"- [{user}]: {text}")
-            # Fetch threaded replies under this comment
+                lines.append(f"[{user}]: {text}")
+            # Fetch all replies at any depth
             if comment_id:
-                replies = await fetch_threaded_replies(comment_id, client)
+                replies = await fetch_all_replies(comment_id, client, depth=1)
                 lines.extend(replies)
         return "\n".join(lines) if lines else "None"
 
