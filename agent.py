@@ -17,15 +17,17 @@ CLICKUP_BASE = "https://api.clickup.com/api/v2"
 PRE_EXEC_STATUSES = ["ready", "in progress", "in progess", "development", "code-review", "code review"]
 CLOSURE_STATUSES = ["qa", "uat", "prod review", "prod-review", "complete", "done", "ready to close"]
 
-# Trigger patterns — each must match as a standalone phrase, not inside another word.
-# \b ensures "check" ends as a complete word, so "subinspector checking" never matches.
-# "subinspector" alone only triggers when it is NOT followed by a continuation verb/word
-# (e.g. "subinspector checking is done" → no match; bare "subinspector" → match).
+# Trigger patterns — must match as a standalone phrase, not inside another word.
+# Standalone "subinspector" is intentionally excluded: the bot's own comments contain
+# "SubInspector —" which would match and cause an infinite loop.
 _TRIGGER_PATTERNS = [
     re.compile(r'\bsubinspector[ \t]+check\b', re.IGNORECASE),
     re.compile(r'\bsi[ \t]+check\b',            re.IGNORECASE),
-    re.compile(r'\bsubinspector\b(?![ \t]+\w)',  re.IGNORECASE),
 ]
+
+# User ID of the account the bot posts under — skip comments from this user
+# to prevent the bot from reacting to its own comments.
+BOT_USER_ID = os.environ.get("BOT_USER_ID", "100965864")
 
 def _is_trigger(text: str) -> bool:
     return any(p.search(text) for p in _TRIGGER_PATTERNS)
@@ -674,6 +676,13 @@ async def process_webhook(payload):
 
     if not task_id or not event:
         return
+
+    # Skip events triggered by the bot's own actions to prevent infinite loops
+    if history_items:
+        commenter_id = str((history_items[0].get("user") or {}).get("id", ""))
+        if commenter_id == BOT_USER_ID and event == "taskCommentPosted":
+            print(f"[AGENT] Skipping — comment posted by bot user {commenter_id}", flush=True)
+            return
 
     task = await fetch_task(task_id)
 
