@@ -172,7 +172,17 @@ If the ticket is NOT a master ticket, skip this section entirely.
 
 ---
 
+TIER OVERRIDE: If the ticket description or the triggering comment contains "Tier: T1", "Tier: T2", or "Tier: T3" (case-insensitive), use that tier and ignore your own inference. Otherwise infer from the ticket content.
+
+QA SIGN-OFF RULES (Closure check #3):
+- PASS only if a reviewer OTHER than the person who did the work explicitly states approval/sign-off in a comment.
+- "LGTM", "looks good", "approved", "sign-off confirmed" all count — the key word is EXPLICIT. Silence ≠ approval.
+- A comment by the same assignee who did the work does NOT count as QA sign-off.
+- For stakeholder notification (Closure check #5): any @mention of the original requester, BA, or named stakeholder qualifies. A generic "done" with no @mention does NOT.
+- For documentation (Closure check #6): ClickUp description updates, linked Google Docs/Confluence pages, or explicit "N/A — no doc deliverable" all qualify. Absence with no N/A = FAIL.
+
 RESPONSE FORMAT — respond ONLY in this exact format:
+TIER: [T1 / T2 / T3] — [one-line reason for this classification]
 RESULT: PASS or FAIL
 SCORE: X/6
 CHECKS:
@@ -214,12 +224,12 @@ def extract_text_from_comment_obj(obj):
 
 
 def determine_gate(event, status, history_items):
-    """Returns (gate, is_dry_run, trigger_comment_id)."""
+    """Returns (gate, is_dry_run, trigger_comment_id, tier_override)."""
     status = status.lower()
 
     # Auto-check every new ticket at creation time
     if event == "taskCreated":
-        return "INTAKE", False, None
+        return "INTAKE", False, None, None
 
     if event == "taskCommentPosted":
         trigger_comment_id = None
@@ -234,16 +244,22 @@ def determine_gate(event, status, history_items):
             if not comment_text:
                 comment_text = extract_text_from_comment_obj(item)
 
+        # Check for tier override in the triggering comment (e.g. "si check tier: T1")
+        tier_override = None
+        tier_match = re.search(r"tier\s*:\s*(T[123])", comment_text, re.IGNORECASE)
+        if tier_match:
+            tier_override = tier_match.group(1).upper()
+
         triggers = ["subinspector check", "subinspector", "si check"]
         if any(t in comment_text.lower() for t in triggers):
             if any(s in status for s in PRE_EXEC_STATUSES):
-                return "PRE-EXECUTION", True, trigger_comment_id
+                return "PRE-EXECUTION", True, trigger_comment_id, tier_override
             elif any(s in status for s in CLOSURE_STATUSES):
-                return "CLOSURE", True, trigger_comment_id
+                return "CLOSURE", True, trigger_comment_id, tier_override
             else:
-                return "INTAKE", True, trigger_comment_id
+                return "INTAKE", True, trigger_comment_id, tier_override
 
-    return None, False, None
+    return None, False, None, None
 
 
 async def fetch_task(task_id):
@@ -387,7 +403,7 @@ async def fetch_comments(task_id):
         return "\n".join(lines) if lines else "None"
 
 
-async def evaluate_gate(gate, task):
+async def evaluate_gate(gate, task, tier_override=None):
     task_id = task.get("id", "")
     description = (task.get("description") or "")[:4000]
     assignees = ", ".join(a.get("username", "") for a in task.get("assignees", [])) or "None"
@@ -458,8 +474,10 @@ async def evaluate_gate(gate, task):
     comments_text = await fetch_comments(task_id)
 
     is_master = subtask_count > 0
+    tier_line = f"Tier Override: {tier_override} (use this tier — do not infer)\n" if tier_override else ""
     user_message = (
         f"Gate: {gate}\n"
+        f"{tier_line}"
         f"Task: {task.get('name', '')}\n"
         f"Status: {task.get('status', {}).get('status', '')}\n"
         f"Assignees: {assignees}\n"
@@ -566,14 +584,14 @@ async def process_webhook(payload):
         previous_status = before.get("status", "") if isinstance(before, dict) else ""
     previous_status = previous_status or "backlog"
 
-    gate, is_dry_run, trigger_comment_id = determine_gate(event, status, history_items)
-    print(f"[AGENT] Gate: {gate} | Status: {status} | Reply to: {trigger_comment_id}", flush=True)
+    gate, is_dry_run, trigger_comment_id, tier_override = determine_gate(event, status, history_items)
+    print(f"[AGENT] Gate: {gate} | Status: {status} | Reply to: {trigger_comment_id} | Tier override: {tier_override}", flush=True)
 
     if not gate:
         print(f"[AGENT] No gate matched — skipping", flush=True)
         return
 
-    content = await evaluate_gate(gate, task)
+    content = await evaluate_gate(gate, task, tier_override=tier_override)
 
     result_match = re.search(r"RESULT:\s*(PASS|FAIL)", content, re.IGNORECASE)
     score_match = re.search(r"SCORE:\s*(\d+)/6", content, re.IGNORECASE)
