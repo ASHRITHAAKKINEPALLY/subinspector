@@ -1,8 +1,28 @@
 from fastapi import FastAPI, Request, BackgroundTasks
+from contextlib import asynccontextmanager
 from agent import process_webhook
 import traceback
+import asyncio
+import httpx
 
-app = FastAPI()
+async def keep_alive():
+    """Ping own health endpoint every 4 minutes to prevent HF Space from sleeping."""
+    await asyncio.sleep(60)  # wait for app to fully start first
+    while True:
+        try:
+            async with httpx.AsyncClient() as client:
+                await client.get("http://localhost:7860/health", timeout=10)
+            print("[KEEPALIVE] ping ok", flush=True)
+        except Exception:
+            pass
+        await asyncio.sleep(240)  # 4 minutes
+
+@asynccontextmanager
+async def lifespan(app):
+    asyncio.create_task(keep_alive())
+    yield
+
+app = FastAPI(lifespan=lifespan)
 
 @app.post("/webhook")
 async def webhook(request: Request, background_tasks: BackgroundTasks):
