@@ -689,15 +689,31 @@ async def process_webhook(payload):
     if not task_id or not event:
         return
 
-    # Skip taskStatusUpdated from the bot account to prevent revert loops.
-    # taskCommentPosted is NOT blanket-skipped: the trigger now requires a leading
-    # slash (/si check) which never appears in the bot's own comments, so there
-    # is no loop risk from comment events.
-    if event == "taskStatusUpdated" and history_items:
+    # Bot-account loop prevention — two cases:
+    # 1. taskStatusUpdated from bot → always skip (prevents revert → re-evaluate loop)
+    # 2. taskCommentPosted from bot → skip UNLESS it's a short bare trigger phrase
+    #    (≤ 100 chars). The bot's evaluation reports are hundreds of chars; a human
+    #    typing /si check is < 20 chars. This makes loops structurally impossible:
+    #    even if the LLM somehow outputs the trigger phrase, the comment length will
+    #    be >> 100 chars and will be skipped.
+    if history_items:
         actor_id = str((history_items[0].get("user") or {}).get("id", ""))
         if actor_id == BOT_USER_ID:
-            print(f"[AGENT] Skipping — taskStatusUpdated from bot account", flush=True)
-            return
+            if event == "taskStatusUpdated":
+                print(f"[AGENT] Skipping — taskStatusUpdated from bot account", flush=True)
+                return
+            if event == "taskCommentPosted":
+                item = history_items[0]
+                comment_obj = (
+                    item.get("comment")
+                    or (item.get("data") or {}).get("comment")
+                    or {}
+                )
+                raw_text = (extract_comment_text(comment_obj) or extract_comment_text(item) or "").strip()
+                # Only allow through if it looks like a human-typed trigger (short + matches pattern)
+                if not (_is_trigger(raw_text) and len(raw_text) <= 100):
+                    print(f"[AGENT] Skipping — bot account comment (len={len(raw_text)})", flush=True)
+                    return
 
     try:
         task = await fetch_task(task_id)
@@ -735,6 +751,13 @@ async def process_webhook(payload):
             reply_to_comment_id=trigger_comment_id
         )
         return
+
+    # Strip any trigger phrase the LLM may have hallucinated into its output.
+    # This is the third layer of loop prevention (after bot-account skip and
+    # hardcoded-string discipline) — makes loops impossible even if the LLM
+    # spontaneously generates the trigger phrase in a check detail or summary.
+    for _tp in _TRIGGER_PATTERNS:
+        content = _tp.sub("[re-check command]", content)
 
     result_match = re.search(r"RESULT:\s*(PASS|FAIL)", content, re.IGNORECASE)
     result = result_match.group(1).upper() if result_match else "FAIL"
