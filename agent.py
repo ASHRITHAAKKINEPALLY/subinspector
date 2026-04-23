@@ -670,12 +670,14 @@ async def process_webhook(payload):
     if not task_id or not event:
         return
 
-    # Skip ALL events triggered by the bot's own account to prevent loops
-    # (covers both taskCommentPosted from bot replies AND taskStatusUpdated from reverts)
-    if history_items:
+    # Skip taskStatusUpdated events triggered by the bot's own account (revert loop prevention).
+    # We do NOT skip taskCommentPosted from the bot account because the API key owner
+    # may post "si check" manually — and the bot's own structured comments never contain
+    # the trigger phrase, so there is no comment loop risk.
+    if event == "taskStatusUpdated" and history_items:
         actor_id = str((history_items[0].get("user") or {}).get("id", ""))
         if actor_id == BOT_USER_ID:
-            print(f"[AGENT] Skipping — action by bot user {actor_id}", flush=True)
+            print(f"[AGENT] Skipping — taskStatusUpdated from bot account {actor_id}", flush=True)
             return
 
     task = await fetch_task(task_id)
