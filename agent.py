@@ -13,6 +13,10 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 CLICKUP_API_KEY = os.environ.get("CLICKUP_API_KEY")
 ENFORCEMENT_FOLDERS = os.environ.get("ENFORCEMENT_FOLDERS", "90165998786").split(",")
 
+print(f"[AGENT] Startup check — GROQ_API_KEY={'SET (' + GROQ_API_KEY[:8] + '...)' if GROQ_API_KEY else 'MISSING ⚠️'}", flush=True)
+print(f"[AGENT] Startup check — CLICKUP_API_KEY={'SET (' + CLICKUP_API_KEY[:8] + '...)' if CLICKUP_API_KEY else 'MISSING ⚠️'}", flush=True)
+print(f"[AGENT] Startup check — ENFORCEMENT_FOLDERS={ENFORCEMENT_FOLDERS}", flush=True)
+
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 CLICKUP_BASE = "https://api.clickup.com/api/v2"
 
@@ -849,11 +853,13 @@ async def process_webhook(payload):
     try:
         content, raw_comments = await evaluate_gate(gate, task, tier_override=tier_override)
     except Exception as e:
-        print(f"[AGENT] evaluate_gate failed: {e}", flush=True)
+        err_type = type(e).__name__
+        err_msg = str(e)[:300]
+        print(f"[AGENT] evaluate_gate failed — {err_type}: {err_msg}", flush=True)
         traceback.print_exc()
         await post_comment(
             task_id,
-            f"⚠️ SubInspector could not complete the {gate} gate check. Please trigger a re-check to retry.",
+            f"⚠️ SubInspector — {gate} gate check failed.\n`{err_type}: {err_msg}`",
             reply_to_comment_id=trigger_comment_id
         )
         return
