@@ -518,6 +518,8 @@ async def evaluate_gate(gate, task, tier_override=None):
             }
         )
         data = response.json()
+        if "choices" not in data:
+            raise ValueError(f"Groq error (HTTP {response.status_code}): {data}")
         return data["choices"][0]["message"]["content"], raw_comments
 
 
@@ -705,10 +707,12 @@ async def process_webhook(payload):
     try:
         content, raw_comments = await evaluate_gate(gate, task, tier_override=tier_override)
     except Exception as e:
+        import traceback
         print(f"[AGENT] evaluate_gate failed: {e}", flush=True)
+        traceback.print_exc()
         await post_comment(
             task_id,
-            f"⚠️ SubInspector could not complete the {gate} gate check. Please retry with `si check`.",
+            f"⚠️ SubInspector could not complete the {gate} gate check. Please retry with `/si check`.",
             reply_to_comment_id=trigger_comment_id
         )
         return
