@@ -749,7 +749,7 @@ async def revert_status(task_id, status) -> bool:
             return False
 
 
-def format_comment(gate, content, score, passed, prior_failures=0, reverted_to=None):
+def format_comment(gate, content, score, passed, prior_failures=0, reverted_to=None, auto_promoted=False):
     """Parse LLM output and render a clean, structured ClickUp comment."""
 
     # ── extract pieces from LLM response ──────────────────────────────────
@@ -777,6 +777,8 @@ def format_comment(gate, content, score, passed, prior_failures=0, reverted_to=N
     ]
     if reverted_to:
         lines.append(f"🔁 **Status reverted to:** `{reverted_to}`")
+    if auto_promoted:
+        lines.append(f"🚀 **Auto-promoted to:** `complete`")
     lines.append("")
 
     # ── checks table ────────────────────────────────────────────────────────
@@ -1128,6 +1130,16 @@ async def process_webhook(payload):
 
     passed = int(score) == 6
 
+    # ── AUTO-PROMOTE ───────────────────────────────────────────────────────────
+    # CLOSURE gate passed 6/6 on an in-scope ticket that isn't already complete →
+    # move it to complete automatically so the user doesn't have to.
+    # Out-of-scope folders (advisory dry-run) are excluded.
+    auto_promoted = False
+    if gate == "CLOSURE" and passed and folder_id in ENFORCEMENT_FOLDERS and status.lower() not in ("complete", "done"):
+        print(f"[AGENT] CLOSURE gate PASS — auto-promoting {task_id} to complete", flush=True)
+        auto_promoted = await revert_status(task_id, "complete")
+    # ── END AUTO-PROMOTE ───────────────────────────────────────────────────────
+
     # ── AUTO-COMPLETE ──────────────────────────────────────────────────────────
     # When all failing CLOSURE checks are soft formalities SI can write itself
     # (closing note, stakeholder mention, docs N/A), SI fills the gaps automatically.
@@ -1189,6 +1201,6 @@ async def process_webhook(payload):
         if not success:
             print(f"[AGENT] ⚠️ Revert failed — comment will NOT claim status was changed", flush=True)
 
-    comment = format_comment(gate, content, score, passed, prior_failures, reverted_to=reverted_to)
+    comment = format_comment(gate, content, score, passed, prior_failures, reverted_to=reverted_to, auto_promoted=auto_promoted)
 
     await post_comment(task_id, comment, reply_to_comment_id=trigger_comment_id)
