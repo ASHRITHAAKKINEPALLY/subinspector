@@ -23,6 +23,14 @@ CLICKUP_BASE = "https://api.clickup.com/api/v2"
 PRE_EXEC_STATUSES = ["ready", "in progress", "in progess", "development", "code-review", "code review"]
 CLOSURE_STATUSES = ["qa", "uat", "prod review", "prod-review", "complete", "done", "ready to close"]
 
+# Statuses where SI has nothing to evaluate — ticket is parked, killed, or waiting on someone else.
+# On webhook events: skip silently. On /si check: post a one-liner and stop.
+INACTIVE_STATUSES = {
+    "abandoned", "blocked", "on hold", "onhold", "cancelled", "canceled",
+    "deferred", "parked", "won't do", "wont do", "not doing", "deprioritized",
+    "duplicate", "invalid", "wontfix", "won't fix",
+}
+
 # When a manual /si check triggers a CLOSURE FAIL and we have no previous_status
 # from the webhook payload, revert to this fallback status.
 CLOSURE_REVERT_MAP = {
@@ -1036,6 +1044,30 @@ async def process_webhook(payload):
     if history_items:
         before = history_items[0].get("before") or {}
         previous_status = (before.get("status", "") if isinstance(before, dict) else "") or ""
+
+    # Inactive tickets — SI has nothing to gate on. Webhook events skip silently;
+    # manual /si check gets a one-liner so the user knows SI saw it.
+    if status.lower() in INACTIVE_STATUSES:
+        print(f"[AGENT] Skipping — inactive status: {status}", flush=True)
+        if event == "taskCommentPosted":
+            # Need trigger_comment_id to reply in the right thread — peek at history
+            trigger_comment_id = None
+            if history_items:
+                item = history_items[0]
+                comment_obj = (
+                    item.get("comment")
+                    or (item.get("data") or {}).get("comment")
+                    or {}
+                )
+                own_id    = (comment_obj.get("id") if isinstance(comment_obj, dict) else None) or item.get("id") or None
+                parent_id = (comment_obj.get("parent") if isinstance(comment_obj, dict) else None) or None
+                trigger_comment_id = parent_id or own_id
+            await post_comment(
+                task_id,
+                f"⏸️ **SubInspector — Skipped**\nTicket status is **{status}** — gate checks don't apply to inactive tickets.",
+                reply_to_comment_id=trigger_comment_id
+            )
+        return
 
     gate, is_dry_run, trigger_comment_id, tier_override = determine_gate(event, status, history_items)
 
