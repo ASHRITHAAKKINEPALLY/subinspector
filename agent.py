@@ -154,19 +154,67 @@ def get_system_prompt(gate: str) -> str:
 
 
 def extract_comment_text(obj):
-    """Pull plain text from any ClickUp comment object regardless of structure."""
+    """Pull plain text AND embedded URLs from any ClickUp comment object.
+
+    ClickUp stores rich-text embeds (Google Sheets, Drive files, ClickUp Docs)
+    as bookmark/embed blocks whose URL lives in attrs.href / attrs.url / attrs.link —
+    NOT in the plain `text` field.  We must scan blocks even when text_content
+    already has a value, because text_content never contains bookmark URLs.
+    """
     if not obj:
         return ""
+
+    # --- 1. Plain text fields -------------------------------------------------
+    plain_text = ""
     for field in ("comment_text", "text_content", "text"):
         val = obj.get(field, "")
         if val and isinstance(val, str) and val.strip():
-            return val.strip()
+            plain_text = val.strip()
+            break
+
+    # --- 2. Rich-text block scanning (always run even if plain_text found) ----
     blocks = obj.get("comment") or []
+    block_parts = []
+    block_urls  = []
     if isinstance(blocks, list):
-        parts = [b.get("text", "").strip() for b in blocks if isinstance(b, dict) and b.get("text")]
-        text = " ".join(parts).strip()
-        if text:
-            return text
+        for b in blocks:
+            if not isinstance(b, dict):
+                continue
+            # Plain text inside the block
+            if b.get("text"):
+                block_parts.append(b["text"].strip())
+            # Bookmark / embed URL (Google Sheets, Drive, ClickUp Docs, etc.)
+            # ClickUp uses both "attributes" and "attrs" depending on version
+            for attr_key in ("attributes", "attrs"):
+                attrs = b.get(attr_key) or {}
+                if isinstance(attrs, dict):
+                    for url_key in ("link", "href", "url"):
+                        url_val = attrs.get(url_key, "")
+                        if url_val and isinstance(url_val, str) and url_val.startswith("http"):
+                            block_urls.append(url_val)
+                            break  # only take first URL per attr dict
+            # URL directly on the block object
+            for url_key in ("url", "link", "href"):
+                url_val = b.get(url_key, "")
+                if url_val and isinstance(url_val, str) and url_val.startswith("http"):
+                    block_urls.append(url_val)
+                    break
+
+    # --- 3. Combine -----------------------------------------------------------
+    parts = []
+    if plain_text:
+        parts.append(plain_text)
+    if block_parts:
+        joined = " ".join(block_parts).strip()
+        if joined and joined != plain_text:
+            parts.append(joined)
+    if block_urls:
+        parts.append(" ".join(block_urls))
+
+    result = " ".join(parts).strip()
+    if result:
+        return result
+
     return ""
 
 
@@ -383,7 +431,9 @@ async def fetch_comments(task_id):
                         lines.extend(replies)
                     except Exception:
                         pass
-            return ("\n".join(lines) if lines else "None"), comments
+            full_text = "\n".join(lines) if lines else "None"
+            print(f"[AGENT] fetch_comments: {len(comments)} top-level comments, {len(lines)} total lines, {len(full_text)} chars total", flush=True)
+            return full_text, comments
     except Exception as e:
         print(f"[AGENT] fetch_comments failed entirely: {e}", flush=True)
         traceback.print_exc()
@@ -482,13 +532,21 @@ async def evaluate_gate(gate, task, tier_override=None):
     # so the LLM always knows about linked sheets/docs even if they're cut off.
     _url_re = re.compile(r'https?://\S+')
     _all_urls = _url_re.findall(comments_text)
-    _sheet_urls  = [u for u in _all_urls if 'docs.google.com/spreadsheet' in u or 'sheets.google.com' in u]
+    # Google Sheets — both docs.google.com/spreadsheets AND drive.google.com embeds
+    _sheet_urls  = [u for u in _all_urls if
+                    'docs.google.com/spreadsheet' in u
+                    or 'sheets.google.com' in u
+                    or ('drive.google.com' in u and ('spreadsheet' in u or 'gsheets' in u))]
+    # Google Drive generic (file uploads, sheets without keyword in URL)
+    _gdrive_urls = [u for u in _all_urls if 'drive.google.com' in u and u not in _sheet_urls]
     _gdoc_urls   = [u for u in _all_urls if 'docs.google.com/document' in u]
     _cu_doc_urls = [u for u in _all_urls if 'app.clickup.com' in u and '/docs/' in u]
     _gh_urls     = [u for u in _all_urls if 'github.com' in u and '/pull/' in u]
     _link_parts  = []
     if _sheet_urls:
         _link_parts.append("Google Sheets (validation/data evidence): " + ", ".join(_sheet_urls[:5]))
+    if _gdrive_urls:
+        _link_parts.append("Google Drive files (count as attached evidence): " + ", ".join(_gdrive_urls[:5]))
     if _gdoc_urls:
         _link_parts.append("Google Docs: " + ", ".join(_gdoc_urls[:3]))
     if _cu_doc_urls:
@@ -496,10 +554,24 @@ async def evaluate_gate(gate, task, tier_override=None):
     if _gh_urls:
         _link_parts.append("GitHub PRs: " + ", ".join(_gh_urls[:3]))
     links_section = ("Links found in comments (count as attached evidence):\n" + "\n".join(_link_parts)) if _link_parts else "None"
+    print(f"[AGENT] Links extracted — sheets={len(_sheet_urls)} drive={len(_gdrive_urls)} docs={len(_gdoc_urls)} gh={len(_gh_urls)}", flush=True)
 
     # Cap sections — system prompt ~850 tokens, output ~1500 tokens,
     # links_section is tiny, leaving ~3500 tokens for the rest of the user message.
-    comments_text_capped  = comments_text[:4000]
+    #
+    # IMPORTANT: use first-2000 + last-2000 so we always see BOTH the oldest
+    # evidence (e.g. Feb validation sheet) AND the most recent closure notes.
+    # A simple head-cap would cut off recent notes when there are many SI comments.
+    _COMMENT_HEAD = 2000
+    _COMMENT_TAIL = 2000
+    if len(comments_text) > (_COMMENT_HEAD + _COMMENT_TAIL):
+        comments_text_capped = (
+            comments_text[:_COMMENT_HEAD]
+            + "\n\n...[middle comments truncated — links/evidence above are extracted from ALL comments]...\n\n"
+            + comments_text[-_COMMENT_TAIL:]
+        )
+    else:
+        comments_text_capped = comments_text
     attachment_info_capped = attachment_info[:2500]
     subtask_info_capped    = subtask_info[:1500]
 
