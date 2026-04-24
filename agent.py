@@ -1007,7 +1007,7 @@ async def process_webhook(payload):
     # When CLOSURE gate scores 5/6 and the one failing check is a soft formality
     # (closing note, stakeholder mention, docs N/A), SI writes the missing
     # content, posts it, and moves the ticket to complete automatically.
-    if gate == "CLOSURE" and not passed and int(score) == 5:
+    if gate == "CLOSURE" and not passed:
         can_fix, failing_checks = _can_auto_complete(int(score), content)
         if can_fix:
             print(f"[AGENT] Auto-complete triggered — soft gaps: {failing_checks}", flush=True)
