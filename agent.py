@@ -797,17 +797,11 @@ def _can_auto_complete(score: int, content: str) -> tuple[bool, list[str]]:
 
 def _resolve_stakeholder(task: dict) -> str:
     """
-    Determine who to @mention as stakeholder in the closing note.
-    Uses the ticket creator if they are not one of the assignees doing the work.
-    Falls back to Komal Saraogi (IH BA/PM) if creator == assignee or is unknown.
+    Returns the ticket creator's username as the stakeholder to notify.
+    If creator info is missing, returns an empty string (no @mention added).
     """
-    assignee_ids = {str(a.get("id", "")) for a in task.get("assignees", [])}
-    creator      = task.get("creator") or {}
-    creator_id   = str(creator.get("id", ""))
-    creator_name = creator.get("username", "")
-    if creator_name and creator_id and creator_id not in assignee_ids:
-        return creator_name
-    return "Komal Saraogi"
+    creator = task.get("creator") or {}
+    return creator.get("username", "")
 
 
 async def generate_auto_closing_note(task: dict, comments_text: str) -> str:
@@ -849,7 +843,7 @@ Write a concise closing note with EXACTLY this structure:
 Moving ticket to **Done**. 🎉
 
 Important rules:
-- @mention {stakeholder} as the stakeholder notification (do NOT mention anyone else)
+- {"@mention " + stakeholder + " at the end to notify them the ticket is done" if stakeholder else "Do NOT @mention anyone — creator unknown"}
 - Only include facts present in the description or comments — do NOT invent
 - Keep bullets short (one line each)
 - No extra commentary outside the format above"""
