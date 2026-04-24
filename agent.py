@@ -795,21 +795,38 @@ def _can_auto_complete(score: int, content: str) -> tuple[bool, list[str]]:
     return can_fix, failing
 
 
+def _resolve_stakeholder(task: dict) -> str:
+    """
+    Determine who to @mention as stakeholder in the closing note.
+    Uses the ticket creator if they are not one of the assignees doing the work.
+    Falls back to Komal Saraogi (IH BA/PM) if creator == assignee or is unknown.
+    """
+    assignee_ids = {str(a.get("id", "")) for a in task.get("assignees", [])}
+    creator      = task.get("creator") or {}
+    creator_id   = str(creator.get("id", ""))
+    creator_name = creator.get("username", "")
+    if creator_name and creator_id and creator_id not in assignee_ids:
+        return creator_name
+    return "Komal Saraogi"
+
+
 async def generate_auto_closing_note(task: dict, comments_text: str) -> str:
     """
     Use Groq to draft a closing note from ticket context.
     Uses the small/fast 8b model — output is short (~300 tokens).
     """
     import datetime
-    today = datetime.date.today().strftime("%b %d, %Y")
-    task_name  = task.get("name", "")
-    assignees  = ", ".join(a.get("username", "") for a in task.get("assignees", [])) or "team"
+    today       = datetime.date.today().strftime("%b %d, %Y")
+    task_name   = task.get("name", "")
+    assignees   = ", ".join(a.get("username", "") for a in task.get("assignees", [])) or "team"
     description = (task.get("description") or "")[:1500]
+    stakeholder = _resolve_stakeholder(task)
 
     prompt = f"""You are writing a professional closing note for a ClickUp ticket on behalf of the team lead.
 
 Ticket: {task_name}
 Assignees: {assignees}
+Stakeholder to notify: {stakeholder}
 Today: {today}
 Description (summary):
 {description}
@@ -832,7 +849,7 @@ Write a concise closing note with EXACTLY this structure:
 Moving ticket to **Done**. 🎉
 
 Important rules:
-- @mention Komal Saraogi as stakeholder notification
+- @mention {stakeholder} as the stakeholder notification (do NOT mention anyone else)
 - Only include facts present in the description or comments — do NOT invent
 - Keep bullets short (one line each)
 - No extra commentary outside the format above"""
