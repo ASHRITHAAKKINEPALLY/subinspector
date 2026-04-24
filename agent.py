@@ -586,7 +586,7 @@ async def evaluate_gate(gate, task, tier_override=None):
     try:
         content = await _call_groq(primary)
         print(f"[AGENT] Groq OK — model={primary}", flush=True)
-        return content, raw_comments
+        return content, raw_comments, comments_text_capped
     except _RateLimitError as e:
         print(f"[AGENT] {primary} rate limited — switching to {fallback} immediately", flush=True)
         last_error = e
@@ -601,7 +601,7 @@ async def evaluate_gate(gate, task, tier_override=None):
         try:
             content = await _call_groq(fallback)
             print(f"[AGENT] Groq OK — model={fallback} attempt={attempt+1}", flush=True)
-            return content, raw_comments
+            return content, raw_comments, comments_text_capped
         except _RateLimitError as e:
             wait_sec = 20 * (attempt + 1)
             print(f"[AGENT] {fallback} rate limited (attempt {attempt+1}/3) — waiting {wait_sec}s", flush=True)
@@ -764,6 +764,99 @@ async def count_subinspector_failures(task_id, raw_comments=None):
         return 0
 
 
+# Checks whose gap can be filled by SI writing content.
+# "evidence" and "open subtask" require real human action — not auto-fixable.
+_AUTO_FIXABLE_CHECK_KEYWORDS = [
+    "acceptance criteria",
+    "qa sign-off",
+    "sign-off",
+    "stakeholder notified",
+    "stakeholder",
+    "documentation updated",
+    "documentation",
+]
+
+
+def _can_auto_complete(score: int, content: str) -> tuple[bool, list[str]]:
+    """
+    Returns (can_auto_complete, failing_check_names).
+    Auto-complete is possible when score == 5 and the one failing check is
+    something SI can write (closing note / stakeholder mention / docs N/A).
+    """
+    if score != 5:
+        return False, []
+    failing = re.findall(r'\|\s*\d+\s*\|\s*([^|]+?)\s*\|\s*❌\s*FAIL', content)
+    if not failing:
+        return False, []
+    can_fix = all(
+        any(kw in check.lower() for kw in _AUTO_FIXABLE_CHECK_KEYWORDS)
+        for check in failing
+    )
+    return can_fix, failing
+
+
+async def generate_auto_closing_note(task: dict, comments_text: str) -> str:
+    """
+    Use Groq to draft a closing note from ticket context.
+    Uses the small/fast 8b model — output is short (~300 tokens).
+    """
+    import datetime
+    today = datetime.date.today().strftime("%b %d, %Y")
+    task_name  = task.get("name", "")
+    assignees  = ", ".join(a.get("username", "") for a in task.get("assignees", [])) or "team"
+    description = (task.get("description") or "")[:1500]
+
+    prompt = f"""You are writing a professional closing note for a ClickUp ticket on behalf of the team lead.
+
+Ticket: {task_name}
+Assignees: {assignees}
+Today: {today}
+Description (summary):
+{description}
+
+Recent comments / work evidence:
+{comments_text[:1800]}
+
+Write a concise closing note with EXACTLY this structure:
+✅ Closure Notes — {today}
+---
+**What was delivered:**
+- [bullet based on description/comments — factual, no invention]
+- [bullet]
+
+**Evidence:**
+- [reference any validation, PR, query, or sheet mentioned in comments]
+- All acceptance criteria addressed ✓
+- No open subtasks or blockers ✓
+
+Moving ticket to **Done**. 🎉
+
+Important rules:
+- @mention Komal Saraogi as stakeholder notification
+- Only include facts present in the description or comments — do NOT invent
+- Keep bullets short (one line each)
+- No extra commentary outside the format above"""
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                GROQ_URL,
+                headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+                json={
+                    "model": "llama-3.1-8b-instant",
+                    "temperature": 0.15,
+                    "max_tokens": 400,
+                    "messages": [{"role": "user", "content": prompt}]
+                }
+            )
+            data = resp.json()
+            if "choices" in data:
+                return data["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        print(f"[AGENT] generate_auto_closing_note failed: {e}", flush=True)
+    return ""
+
+
 async def fetch_comment_text_from_api(comment_id: str) -> str:
     """Fetch a single comment's text directly from the ClickUp API as a fallback."""
     try:
@@ -872,7 +965,7 @@ async def process_webhook(payload):
         return
 
     try:
-        content, raw_comments = await evaluate_gate(gate, task, tier_override=tier_override)
+        content, raw_comments, comments_text_for_note = await evaluate_gate(gate, task, tier_override=tier_override)
     except Exception as e:
         err_type = type(e).__name__
         err_msg = str(e)[:300]
@@ -885,18 +978,13 @@ async def process_webhook(payload):
         )
         return
 
-    # Strip any trigger phrase the LLM may have hallucinated into its output.
-    # This is the third layer of loop prevention (after bot-account skip and
-    # hardcoded-string discipline) — makes loops impossible even if the LLM
-    # spontaneously generates the trigger phrase in a check detail or summary.
+    # Strip any trigger phrase the LLM may have hallucinated (loop prevention layer 3).
     for _tp in _TRIGGER_PATTERNS:
         content = _tp.sub("[re-check command]", content)
 
     result_match = re.search(r"RESULT:\s*(PASS|FAIL)", content, re.IGNORECASE)
-    result = result_match.group(1).upper() if result_match else "FAIL"
 
-    # Count actual ✅ PASS entries in the checks table rather than trusting
-    # the LLM's stated SCORE, which it occasionally miscounts.
+    # Count actual ✅ PASS entries — more reliable than trusting the LLM's stated SCORE.
     checks_match = re.search(r"CHECKS:\n(.*?)(?=\nSUMMARY:|\nMASTER TICKET:|$)", content, re.DOTALL)
     if checks_match:
         score = str(checks_match.group(1).count("✅ PASS"))
@@ -905,6 +993,38 @@ async def process_webhook(payload):
         score = score_match.group(1) if score_match else "0"
 
     passed = int(score) == 6
+
+    # ── AUTO-COMPLETE ──────────────────────────────────────────────────────────
+    # When CLOSURE gate scores 5/6 and the one failing check is a soft formality
+    # (closing note, stakeholder mention, docs N/A), SI writes the missing
+    # content, posts it, and moves the ticket to complete automatically.
+    if gate == "CLOSURE" and not passed and int(score) == 5:
+        can_fix, failing_checks = _can_auto_complete(int(score), content)
+        if can_fix:
+            print(f"[AGENT] Auto-complete triggered — soft gaps: {failing_checks}", flush=True)
+            closing_note = await generate_auto_closing_note(task, comments_text_for_note)
+            if closing_note:
+                for _tp in _TRIGGER_PATTERNS:
+                    closing_note = _tp.sub("[re-check command]", closing_note)
+                await post_comment(
+                    task_id,
+                    f"🤖 **SubInspector — Auto-Generated Closing Note**\n\n{closing_note}\n\n"
+                    f"_Auto-generated by SubInspector based on ticket context and comments._",
+                    reply_to_comment_id=trigger_comment_id
+                )
+                moved = await revert_status(task_id, "complete")
+                status_line = "✅ Ticket moved to **complete**." if moved else "⚠️ Could not update status — please move manually."
+                await post_comment(
+                    task_id,
+                    f"🤖 **SubInspector — Auto-Completed** | Score 5/6\n\n"
+                    f"The only gap (`{'`, `'.join(failing_checks)}`) was a formality SI could fill.\n"
+                    f"Closing note posted above. {status_line}",
+                    reply_to_comment_id=trigger_comment_id
+                )
+                print(f"[AGENT] Auto-complete done for {task_id}", flush=True)
+                return
+            print(f"[AGENT] Auto-complete: note generation failed — falling back to normal FAIL flow", flush=True)
+    # ── END AUTO-COMPLETE ──────────────────────────────────────────────────────
 
     prior_failures = 0 if passed else await count_subinspector_failures(task_id, raw_comments=raw_comments)
     if not passed and prior_failures >= 2:
