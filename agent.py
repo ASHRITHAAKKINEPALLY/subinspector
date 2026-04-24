@@ -319,6 +319,32 @@ async def fetch_task(task_id):
     raise ValueError(f"fetch_task failed after 3 attempts for {task_id}")
 
 
+async def read_google_sheet(url: str) -> str:
+    """Fetch a publicly shared Google Sheet as CSV and return the first 150 rows as text.
+    Works for any sheet shared with 'anyone with the link can view'.
+    Returns empty string if the sheet is private or unreachable."""
+    try:
+        sheet_match = re.search(r'/spreadsheets/d/([a-zA-Z0-9-_]+)', url)
+        if not sheet_match:
+            return ""
+        sheet_id = sheet_match.group(1)
+        gid_match = re.search(r'[#&?]gid=(\d+)', url)
+        gid = gid_match.group(1) if gid_match else "0"
+        csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+            resp = await client.get(csv_url)
+        if resp.status_code != 200 or not resp.text.strip():
+            print(f"[AGENT] read_google_sheet: HTTP {resp.status_code} for {url}", flush=True)
+            return ""
+        lines = resp.text.strip().splitlines()
+        preview = "\n".join(lines[:150])
+        print(f"[AGENT] read_google_sheet: fetched {len(lines)} rows from {url}", flush=True)
+        return f"[Google Sheet — {len(lines)} rows]\n{preview}"
+    except Exception as e:
+        print(f"[AGENT] read_google_sheet failed ({url}): {e}", flush=True)
+        return ""
+
+
 async def read_attachment(url, filename):
     """Download an attachment and extract its text content."""
     try:
@@ -570,6 +596,21 @@ async def evaluate_gate(gate, task, tier_override=None):
     links_section = ("Links found in comments (count as attached evidence):\n" + "\n".join(_link_parts)) if _link_parts else "None"
     print(f"[AGENT] Links extracted — sheets={len(_sheet_urls)} drive={len(_gdrive_urls)} docs={len(_gdoc_urls)} gh={len(_gh_urls)}", flush=True)
 
+    # Try to fetch actual content from Google Sheets (works for publicly shared sheets).
+    # Fetch up to 2 sheets in parallel; cap combined output at 3000 chars.
+    sheet_data_parts = []
+    if _sheet_urls:
+        sheet_results = await asyncio.gather(
+            *[read_google_sheet(u) for u in _sheet_urls[:2]],
+            return_exceptions=True
+        )
+        for r in sheet_results:
+            if isinstance(r, str) and r:
+                sheet_data_parts.append(r)
+    sheet_data_section = "\n\n".join(sheet_data_parts)[:3000] if sheet_data_parts else ""
+    if sheet_data_section:
+        print(f"[AGENT] Sheet data fetched — {len(sheet_data_section)} chars", flush=True)
+
     # Cap sections — system prompt ~850 tokens, output ~1500 tokens,
     # links_section is tiny, leaving ~3500 tokens for the rest of the user message.
     #
@@ -617,6 +658,7 @@ async def evaluate_gate(gate, task, tier_override=None):
         f"{links_section}\n\n"
         f"Description:\n{description}\n\n"
         f"Comments (closing notes, QA sign-offs, evidence, sub-comments):\n{comments_text_capped}\n\n"
+        f"Google Sheet Data (fetched live — use this as validation evidence):\n{sheet_data_section if sheet_data_section else 'None (sheet private or no sheets linked)'}\n\n"
         f"Attachments (actual content read):\n{attachment_info_capped}\n\n"
         f"Subtasks ({subtask_count} total — full details):\n{subtask_info_capped}\n\n"
         f"Custom Fields:\n{custom_fields_info}"
