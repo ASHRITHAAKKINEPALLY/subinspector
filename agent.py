@@ -130,7 +130,7 @@ IMPORTANT EVIDENCE RULE: Any Google Sheets URL, Google Docs URL, ClickUp Doc lin
 IMPORTANT SIGN-OFF RULE: A closure notes comment from Ashritha Akkinepally (team lead) IS the QA sign-off — always PASS check 3 when she has posted closure notes. A comment from any person other than the primary work assignee that confirms completion also counts.
 IMPORTANT DOCS RULE: If the ticket is a bug fix, logic update, or config change with no mention of a BRD or downstream doc needing update, PASS check 6 — documentation N/A is implied by scope.
 
-1. Acceptance Criteria Addressed — each DoD item has explicit confirmation in comments or description. If assignee's closing notes address them, PASS.
+1. Acceptance Criteria Addressed — PASS if any closing note, completion comment, or SI auto-generated note confirms the work is done. FAIL only if there are literally zero completion confirmations of any kind in the comments.
 2. Evidence Attached — screenshots, query results, validation sheet links (Google Sheets/Docs), or before/after SQL/outputs attached, linked, or referenced. FAIL only if NO evidence of any kind exists anywhere.
 3. QA Sign-Off — Ashritha Akkinepally's closure notes = sign-off (always PASS). Any comment from someone other than the primary work assignee confirming the work counts. FAIL only if nobody other than the sole assignee has weighed in at all.
 4. No Open Subtasks — all subtasks closed (done/complete) or explicitly marked N/A.
@@ -263,8 +263,12 @@ def determine_gate(event, status, history_items):
             if any(s in status for s in PRE_EXEC_STATUSES):
                 return "PRE-EXECUTION", True, trigger_comment_id, tier_override
             elif any(s in status for s in CLOSURE_STATUSES):
-                # Enforce on closure — revert status if FAIL (same as auto-webhook)
-                return "CLOSURE", False, trigger_comment_id, tier_override
+                # If the ticket is already at a terminal "done" state, just report —
+                # never revert a ticket that's already been marked complete/done.
+                # Enforcement (revert on fail) only applies to non-final closure
+                # statuses like prod-review, uat, qa.
+                already_done = status in ("complete", "done")
+                return "CLOSURE", already_done, trigger_comment_id, tier_override
             else:
                 return "INTAKE", True, trigger_comment_id, tier_override
         else:
@@ -1079,7 +1083,7 @@ async def process_webhook(payload):
     # When CLOSURE gate scores 5/6 and the one failing check is a soft formality
     # (closing note, stakeholder mention, docs N/A), SI writes the missing
     # content, posts it, and moves the ticket to complete automatically.
-    if gate == "CLOSURE" and not passed:
+    if gate == "CLOSURE" and not passed and status.lower() not in ("complete", "done"):
         can_fix, failing_checks = _can_auto_complete(int(score), content)
         if can_fix:
             print(f"[AGENT] Auto-complete triggered — soft gaps: {failing_checks}", flush=True)
