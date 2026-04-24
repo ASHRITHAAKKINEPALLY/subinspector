@@ -26,13 +26,14 @@ CLOSURE_STATUSES = ["qa", "uat", "prod review", "prod-review", "complete", "done
 # When a manual /si check triggers a CLOSURE FAIL and we have no previous_status
 # from the webhook payload, revert to this fallback status.
 CLOSURE_REVERT_MAP = {
-    "complete":       "prod review",
-    "done":           "prod review",
+    "complete":       "prod-review",
+    "done":           "prod-review",
     "prod review":    "uat",
     "prod-review":    "uat",
-    "ready to close": "prod review",
-    "uat":            "in progress",
-    "qa":             "in progress",
+    "ready to close": "prod-review",
+    "uat":            "development",
+    "qa":             "development",
+    "qa-complete":    "development",
 }
 
 # Trigger patterns — require a leading slash so the bot's own next-steps
@@ -649,7 +650,8 @@ async def post_comment(task_id, comment, reply_to_comment_id=None):
             print(f"[AGENT] ⚠️ Top-level comment also failed ({resp.status_code}): {resp.text[:200]}", flush=True)
 
 
-async def revert_status(task_id, status):
+async def revert_status(task_id, status) -> bool:
+    """Returns True if the status was successfully changed, False otherwise."""
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.put(
             f"{CLICKUP_BASE}/task/{task_id}",
@@ -657,9 +659,11 @@ async def revert_status(task_id, status):
             json={"status": status}
         )
         if resp.status_code < 300:
-            print(f"[AGENT] Status reverted to '{status}' on task {task_id} (status {resp.status_code})", flush=True)
+            print(f"[AGENT] Status reverted to '{status}' on task {task_id} (HTTP {resp.status_code})", flush=True)
+            return True
         else:
-            print(f"[AGENT] ⚠️ Revert failed ({resp.status_code}): {resp.text[:200]}", flush=True)
+            print(f"[AGENT] ⚠️ Revert failed (HTTP {resp.status_code}): {resp.text[:300]}", flush=True)
+            return False
 
 
 def format_comment(gate, content, score, passed, prior_failures=0, reverted_to=None):
@@ -907,11 +911,14 @@ async def process_webhook(payload):
         print(f"[AGENT] Anti-loop triggered after {prior_failures + 1} failures — escalating to BA lead", flush=True)
 
     can_revert = not passed and not is_dry_run and bool(previous_status)
-    comment = format_comment(gate, content, score, passed, prior_failures,
-                             reverted_to=previous_status if can_revert else None)
-
+    reverted_to = None
     if can_revert:
         print(f"[AGENT] Reverting status to: {previous_status}", flush=True)
-        await revert_status(task_id, previous_status)
+        success = await revert_status(task_id, previous_status)
+        reverted_to = previous_status if success else None
+        if not success:
+            print(f"[AGENT] ⚠️ Revert failed — comment will NOT claim status was changed", flush=True)
+
+    comment = format_comment(gate, content, score, passed, prior_failures, reverted_to=reverted_to)
 
     await post_comment(task_id, comment, reply_to_comment_id=trigger_comment_id)
