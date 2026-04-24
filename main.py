@@ -1,9 +1,59 @@
 from fastapi import FastAPI, Request, BackgroundTasks
 from contextlib import asynccontextmanager
-from agent import process_webhook
+from agent import process_webhook, CLICKUP_API_KEY
 import traceback
 import asyncio
+import os
 import httpx
+
+CLICKUP_TEAM_ID  = os.environ.get("CLICKUP_TEAM_ID", "3369097")
+WEBHOOK_ENDPOINT = os.environ.get("WEBHOOK_ENDPOINT", "https://ashakkinepally-subinspector.hf.space/webhook")
+WEBHOOK_EVENTS   = ["taskCreated", "taskStatusUpdated", "taskCommentPosted"]
+
+
+async def ensure_webhook():
+    """On startup, check the ClickUp webhook is active. Recreate it if suspended or missing."""
+    await asyncio.sleep(5)  # let the server finish binding first
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(
+                f"https://api.clickup.com/api/v2/team/{CLICKUP_TEAM_ID}/webhook",
+                headers={"Authorization": CLICKUP_API_KEY}
+            )
+            hooks = resp.json().get("webhooks", [])
+
+        # Find our webhook by endpoint URL
+        our_hooks = [h for h in hooks if h.get("endpoint") == WEBHOOK_ENDPOINT]
+
+        # Check if any of them is healthy
+        healthy = [h for h in our_hooks if (h.get("health") or {}).get("status") == "active"]
+
+        if healthy:
+            print(f"[WEBHOOK] Startup check — webhook active (id={healthy[0]['id']})", flush=True)
+            return
+
+        # Delete any suspended/broken copies pointing to our URL
+        for h in our_hooks:
+            async with httpx.AsyncClient(timeout=10) as client:
+                await client.delete(
+                    f"https://api.clickup.com/api/v2/webhook/{h['id']}",
+                    headers={"Authorization": CLICKUP_API_KEY}
+                )
+            print(f"[WEBHOOK] Deleted suspended webhook {h['id']}", flush=True)
+
+        # Create a fresh one
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.post(
+                f"https://api.clickup.com/api/v2/team/{CLICKUP_TEAM_ID}/webhook",
+                headers={"Authorization": CLICKUP_API_KEY, "Content-Type": "application/json"},
+                json={"endpoint": WEBHOOK_ENDPOINT, "events": WEBHOOK_EVENTS}
+            )
+            new_hook = r.json().get("webhook", r.json())
+        print(f"[WEBHOOK] Recreated webhook — id={new_hook.get('id')} health={new_hook.get('health',{}).get('status')}", flush=True)
+
+    except Exception as e:
+        print(f"[WEBHOOK] ensure_webhook failed: {e}", flush=True)
+
 
 async def keep_alive():
     """Ping own health endpoint every 4 minutes to prevent HF Space from sleeping."""
@@ -19,6 +69,7 @@ async def keep_alive():
 
 @asynccontextmanager
 async def lifespan(app):
+    asyncio.create_task(ensure_webhook())
     asyncio.create_task(keep_alive())
     yield
 
