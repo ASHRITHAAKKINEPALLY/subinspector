@@ -1025,7 +1025,7 @@ async def process_webhook(payload):
                 status_line = "✅ Ticket moved to **complete**." if moved else "⚠️ Could not update status — please move manually."
                 await post_comment(
                     task_id,
-                    f"🤖 **SubInspector — Auto-Completed** | Score 5/6\n\n"
+                    f"🤖 **SubInspector — Auto-Completed** | Score {score}/6\n\n"
                     f"The only gap (`{'`, `'.join(failing_checks)}`) was a formality SI could fill.\n"
                     f"Closing note posted above. {status_line}",
                     reply_to_comment_id=trigger_comment_id
