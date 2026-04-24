@@ -1036,8 +1036,22 @@ async def process_webhook(payload):
     folder_id = str((task.get("folder") or {}).get("id", ""))
     print(f"[AGENT] Folder ID: {folder_id} | In scope: {folder_id in ENFORCEMENT_FOLDERS}", flush=True)
     if folder_id not in ENFORCEMENT_FOLDERS:
-        print(f"[AGENT] Skipping — not in scope", flush=True)
-        return
+        # Out-of-scope folders: skip all webhook events silently.
+        # But if someone explicitly typed /si check, still run a dry-run so they get a response.
+        is_explicit_check = False
+        if event == "taskCommentPosted" and history_items:
+            item = history_items[0]
+            comment_obj = (
+                item.get("comment")
+                or (item.get("data") or {}).get("comment")
+                or {}
+            )
+            raw_text = (extract_comment_text(comment_obj) or extract_comment_text(item) or "").strip()
+            is_explicit_check = _is_trigger(raw_text)
+        if not is_explicit_check:
+            print(f"[AGENT] Skipping — not in scope", flush=True)
+            return
+        print(f"[AGENT] Out-of-scope folder but explicit /si check — running advisory dry-run", flush=True)
 
     status = (task.get("status") or {}).get("status", "")
     previous_status = ""
