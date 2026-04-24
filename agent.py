@@ -319,29 +319,82 @@ async def fetch_task(task_id):
     raise ValueError(f"fetch_task failed after 3 attempts for {task_id}")
 
 
-async def read_google_sheet(url: str) -> str:
-    """Fetch a publicly shared Google Sheet as CSV and return the first 150 rows as text.
-    Works for any sheet shared with 'anyone with the link can view'.
-    Returns empty string if the sheet is private or unreachable."""
+async def _google_service_account_token() -> str:
+    """Return a Bearer token from GOOGLE_SERVICE_ACCOUNT_JSON env var, or '' if not configured."""
+    sa_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+    if not sa_json:
+        return ""
     try:
-        sheet_match = re.search(r'/spreadsheets/d/([a-zA-Z0-9-_]+)', url)
-        if not sheet_match:
-            return ""
-        sheet_id = sheet_match.group(1)
-        gid_match = re.search(r'[#&?]gid=(\d+)', url)
-        gid = gid_match.group(1) if gid_match else "0"
+        import json as _json
+        from google.oauth2 import service_account
+        from google.auth.transport.requests import Request as _GRequest
+        creds = service_account.Credentials.from_service_account_info(
+            _json.loads(sa_json),
+            scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"]
+        )
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, creds.refresh, _GRequest())
+        return creds.token or ""
+    except Exception as e:
+        print(f"[AGENT] Google service account auth failed: {e}", flush=True)
+        return ""
+
+
+async def read_google_sheet(url: str) -> str:
+    """Fetch a Google Sheet and return the first 150 rows as text.
+
+    Strategy:
+    1. Try public CSV export (works for 'anyone with link' sheets).
+    2. If that returns a login redirect / non-CSV, try the Sheets API v4
+       with a service account (requires GOOGLE_SERVICE_ACCOUNT_JSON secret
+       and the sheet shared with the service account email).
+    3. If both fail, return empty string — caller falls back to URL-only hint.
+    """
+    sheet_match = re.search(r'/spreadsheets/d/([a-zA-Z0-9-_]+)', url)
+    if not sheet_match:
+        return ""
+    sheet_id = sheet_match.group(1)
+    gid_match = re.search(r'[#&?]gid=(\d+)', url)
+    gid = gid_match.group(1) if gid_match else "0"
+
+    # ── 1. Public CSV export ──────────────────────────────────────────────────
+    try:
         csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
         async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
             resp = await client.get(csv_url)
-        if resp.status_code != 200 or not resp.text.strip():
-            print(f"[AGENT] read_google_sheet: HTTP {resp.status_code} for {url}", flush=True)
-            return ""
-        lines = resp.text.strip().splitlines()
-        preview = "\n".join(lines[:150])
-        print(f"[AGENT] read_google_sheet: fetched {len(lines)} rows from {url}", flush=True)
-        return f"[Google Sheet — {len(lines)} rows]\n{preview}"
+        # Google returns HTML (login page) for private sheets — detect by content-type
+        is_csv = "text/csv" in resp.headers.get("content-type", "") or (
+            resp.status_code == 200
+            and resp.text.strip()
+            and not resp.text.strip().startswith("<")
+        )
+        if is_csv:
+            lines = resp.text.strip().splitlines()
+            preview = "\n".join(lines[:150])
+            print(f"[AGENT] read_google_sheet (public): {len(lines)} rows from {url}", flush=True)
+            return f"[Google Sheet — {len(lines)} rows]\n{preview}"
+        print(f"[AGENT] read_google_sheet: public export failed (HTTP {resp.status_code}, likely private) — trying service account", flush=True)
     except Exception as e:
-        print(f"[AGENT] read_google_sheet failed ({url}): {e}", flush=True)
+        print(f"[AGENT] read_google_sheet public export error: {e}", flush=True)
+
+    # ── 2. Sheets API v4 with service account ─────────────────────────────────
+    try:
+        token = await _google_service_account_token()
+        if not token:
+            print(f"[AGENT] read_google_sheet: no service account configured — cannot read private sheet", flush=True)
+            return ""
+        api_url = f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values/A1:Z200"
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(api_url, headers={"Authorization": f"Bearer {token}"})
+        if resp.status_code != 200:
+            print(f"[AGENT] read_google_sheet service account: HTTP {resp.status_code}", flush=True)
+            return ""
+        rows = resp.json().get("values", [])
+        lines = ["\t".join(str(c) for c in row) for row in rows[:150]]
+        print(f"[AGENT] read_google_sheet (service account): {len(rows)} rows from {url}", flush=True)
+        return f"[Google Sheet — {len(rows)} rows]\n" + "\n".join(lines)
+    except Exception as e:
+        print(f"[AGENT] read_google_sheet service account error: {e}", flush=True)
         return ""
 
 
