@@ -1106,7 +1106,8 @@ async def process_webhook(payload):
     # Count actual ✅ PASS entries — more reliable than trusting the LLM's stated SCORE.
     checks_match = re.search(r"CHECKS:\n(.*?)(?=\nSUMMARY:|\nMASTER TICKET:|$)", content, re.DOTALL)
     if checks_match:
-        score = str(checks_match.group(1).count("✅ PASS"))
+        # Match both "✅ PASS" and plain "PASS" in table cells — LLM sometimes omits the emoji
+        score = str(len(re.findall(r'\|\s*✅?\s*PASS\b', checks_match.group(1))))
     else:
         score_match = re.search(r"SCORE:\s*(\d+)/6", content, re.IGNORECASE)
         score = score_match.group(1) if score_match else "0"
