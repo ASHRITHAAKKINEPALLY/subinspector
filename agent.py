@@ -28,12 +28,9 @@ CLOSURE_STATUSES = ["qa", "uat", "prod review", "prod-review", "complete", "done
 CLOSURE_REVERT_MAP = {
     "complete":       "prod-review",
     "done":           "prod-review",
-    "prod review":    "uat",
-    "prod-review":    "uat",
     "ready to close": "prod-review",
-    "uat":            "development",
-    "qa":             "development",
-    "qa-complete":    "development",
+    # Tickets already at prod-review/uat/qa are already under review —
+    # don't cascade them lower, just post the FAIL comment.
 }
 
 # Trigger patterns — require a leading slash so the bot's own next-steps
@@ -780,11 +777,12 @@ _AUTO_FIXABLE_CHECK_KEYWORDS = [
 def _can_auto_complete(score: int, content: str) -> tuple[bool, list[str]]:
     """
     Returns (can_auto_complete, failing_check_names).
-    Auto-complete is possible when score == 5 and the one failing check is
-    something SI can write (closing note / stakeholder mention / docs N/A).
+    Auto-complete triggers whenever ALL failing checks are soft formalities
+    SI can write (closing note / acceptance confirmation / stakeholder mention / docs N/A).
+    No score floor — even 3/6 is fine if every gap is a formality.
     """
-    if score != 5:
-        return False, []
+    if score == 6:
+        return False, []  # already passing
     failing = re.findall(r'\|\s*\d+\s*\|\s*([^|]+?)\s*\|\s*❌\s*FAIL', content)
     if not failing:
         return False, []
