@@ -23,14 +23,6 @@ CLICKUP_BASE = "https://api.clickup.com/api/v2"
 PRE_EXEC_STATUSES = ["ready", "in progress", "in progess", "development", "code-review", "code review"]
 CLOSURE_STATUSES = ["qa", "uat", "prod review", "prod-review", "complete", "done", "ready to close"]
 
-# Statuses where SI has nothing to evaluate — ticket is parked, killed, or waiting on someone else.
-# On webhook events: skip silently. On /si check: post a one-liner and stop.
-INACTIVE_STATUSES = {
-    "abandoned", "blocked", "on hold", "onhold", "cancelled", "canceled",
-    "deferred", "parked", "won't do", "wont do", "not doing", "deprioritized",
-    "duplicate", "invalid", "wontfix", "won't fix",
-}
-
 # When a manual /si check triggers a CLOSURE FAIL and we have no previous_status
 # from the webhook payload, revert to this fallback status.
 CLOSURE_REVERT_MAP = {
@@ -161,6 +153,54 @@ def get_system_prompt(gate: str) -> str:
     """Return a gate-specific system prompt (~850 tokens vs 2700 for the monolithic version)."""
     checks = _GATE_CHECKS.get(gate, _GATE_CHECKS["INTAKE"])
     return _SYSTEM_COMMON + "\n" + checks
+
+
+# Threshold: table-embeds with more than this many rows are summarised
+# (they're reference tables — column lists, lookup tables, etc. — not evidence).
+# Small tables (≤ threshold) are formatted as readable text so the LLM can
+# extract BQ paths, KPI definitions, etc. that live inside them.
+_TABLE_EMBED_LARGE_ROWS = 10
+
+def _process_table_embeds(text: str) -> str:
+    """Transform [table-embed:...] blocks before they reach the LLM.
+
+    • Large tables  (> _TABLE_EMBED_LARGE_ROWS rows): collapsed to a one-line
+      token so they don't eat the description character budget.
+    • Small tables  (≤ threshold): formatted as human-readable bullet rows so
+      the LLM can read BQ paths, KPI specs, etc. embedded in them.
+    """
+    def _process(m):
+        content = m.group(1)
+        # Parse "R:C value" cells separated by " | "
+        cells = {}
+        for part in content.split(" | "):
+            part = part.strip()
+            cm = re.match(r'^(\d+):(\d+)\s+(.*)', part)
+            if cm:
+                r, c, val = int(cm.group(1)), int(cm.group(2)), cm.group(3).strip()
+                cells[(r, c)] = val
+
+        if not cells:
+            return m.group(0)  # unparseable — leave as-is
+
+        max_row = max(r for r, _ in cells)
+        max_col = max(c for _, c in cells)
+
+        # Large table → compact summary token
+        if max_row > _TABLE_EMBED_LARGE_ROWS:
+            return f"[table: {max_row} rows × {max_col} cols — reference table present ✓]"
+
+        # Small table → format as readable bullet rows
+        headers = [cells.get((1, c), f"col{c}") for c in range(1, max_col + 1)]
+        lines = []
+        for r in range(2, max_row + 1):
+            row_vals = [cells.get((r, c), "") for c in range(1, max_col + 1)]
+            pairs = [f"{h}: {v}" for h, v in zip(headers, row_vals) if v]
+            if pairs:
+                lines.append("• " + " | ".join(pairs))
+        return "\n".join(lines) if lines else "[table: empty]"
+
+    return re.sub(r'\[table-embed:(.*?)\]', _process, text, flags=re.DOTALL)
 
 
 def extract_comment_text(obj):
@@ -319,85 +359,6 @@ async def fetch_task(task_id):
     raise ValueError(f"fetch_task failed after 3 attempts for {task_id}")
 
 
-async def _google_service_account_token() -> str:
-    """Return a Bearer token from GOOGLE_SERVICE_ACCOUNT_JSON env var, or '' if not configured."""
-    sa_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
-    if not sa_json:
-        return ""
-    try:
-        import json as _json
-        from google.oauth2 import service_account
-        from google.auth.transport.requests import Request as _GRequest
-        creds = service_account.Credentials.from_service_account_info(
-            _json.loads(sa_json),
-            scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"]
-        )
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, creds.refresh, _GRequest())
-        return creds.token or ""
-    except Exception as e:
-        print(f"[AGENT] Google service account auth failed: {e}", flush=True)
-        return ""
-
-
-async def read_google_sheet(url: str) -> str:
-    """Fetch a Google Sheet and return the first 150 rows as text.
-
-    Strategy:
-    1. Try public CSV export (works for 'anyone with link' sheets).
-    2. If that returns a login redirect / non-CSV, try the Sheets API v4
-       with a service account (requires GOOGLE_SERVICE_ACCOUNT_JSON secret
-       and the sheet shared with the service account email).
-    3. If both fail, return empty string — caller falls back to URL-only hint.
-    """
-    sheet_match = re.search(r'/spreadsheets/d/([a-zA-Z0-9-_]+)', url)
-    if not sheet_match:
-        return ""
-    sheet_id = sheet_match.group(1)
-    gid_match = re.search(r'[#&?]gid=(\d+)', url)
-    gid = gid_match.group(1) if gid_match else "0"
-
-    # ── 1. Public CSV export ──────────────────────────────────────────────────
-    try:
-        csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
-        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-            resp = await client.get(csv_url)
-        # Google returns HTML (login page) for private sheets — detect by content-type
-        is_csv = "text/csv" in resp.headers.get("content-type", "") or (
-            resp.status_code == 200
-            and resp.text.strip()
-            and not resp.text.strip().startswith("<")
-        )
-        if is_csv:
-            lines = resp.text.strip().splitlines()
-            preview = "\n".join(lines[:150])
-            print(f"[AGENT] read_google_sheet (public): {len(lines)} rows from {url}", flush=True)
-            return f"[Google Sheet — {len(lines)} rows]\n{preview}"
-        print(f"[AGENT] read_google_sheet: public export failed (HTTP {resp.status_code}, likely private) — trying service account", flush=True)
-    except Exception as e:
-        print(f"[AGENT] read_google_sheet public export error: {e}", flush=True)
-
-    # ── 2. Sheets API v4 with service account ─────────────────────────────────
-    try:
-        token = await _google_service_account_token()
-        if not token:
-            print(f"[AGENT] read_google_sheet: no service account configured — cannot read private sheet", flush=True)
-            return ""
-        api_url = f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values/A1:Z200"
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(api_url, headers={"Authorization": f"Bearer {token}"})
-        if resp.status_code != 200:
-            print(f"[AGENT] read_google_sheet service account: HTTP {resp.status_code}", flush=True)
-            return ""
-        rows = resp.json().get("values", [])
-        lines = ["\t".join(str(c) for c in row) for row in rows[:150]]
-        print(f"[AGENT] read_google_sheet (service account): {len(rows)} rows from {url}", flush=True)
-        return f"[Google Sheet — {len(rows)} rows]\n" + "\n".join(lines)
-    except Exception as e:
-        print(f"[AGENT] read_google_sheet service account error: {e}", flush=True)
-        return ""
-
-
 async def read_attachment(url, filename):
     """Download an attachment and extract its text content."""
     try:
@@ -535,7 +496,11 @@ async def fetch_comments(task_id):
 
 async def evaluate_gate(gate, task, tier_override=None):
     task_id = task.get("id", "")
-    description = (task.get("description") or "")[:4000]
+    # Process table-embeds BEFORE truncating:
+    # • Large tables (>10 rows) → compact summary so they don't eat the char budget
+    # • Small tables → human-readable text so BQ paths / KPI specs are visible to the LLM
+    raw_description = task.get("description") or ""
+    description = _process_table_embeds(raw_description)[:6000]
     assignees = ", ".join(a.get("username", "") for a in task.get("assignees", [])) or "None"
     list_name = (task.get("list") or {}).get("name", "")
     folder_name = (task.get("folder") or {}).get("name", "")
@@ -649,21 +614,6 @@ async def evaluate_gate(gate, task, tier_override=None):
     links_section = ("Links found in comments (count as attached evidence):\n" + "\n".join(_link_parts)) if _link_parts else "None"
     print(f"[AGENT] Links extracted — sheets={len(_sheet_urls)} drive={len(_gdrive_urls)} docs={len(_gdoc_urls)} gh={len(_gh_urls)}", flush=True)
 
-    # Try to fetch actual content from Google Sheets (works for publicly shared sheets).
-    # Fetch up to 2 sheets in parallel; cap combined output at 3000 chars.
-    sheet_data_parts = []
-    if _sheet_urls:
-        sheet_results = await asyncio.gather(
-            *[read_google_sheet(u) for u in _sheet_urls[:2]],
-            return_exceptions=True
-        )
-        for r in sheet_results:
-            if isinstance(r, str) and r:
-                sheet_data_parts.append(r)
-    sheet_data_section = "\n\n".join(sheet_data_parts)[:3000] if sheet_data_parts else ""
-    if sheet_data_section:
-        print(f"[AGENT] Sheet data fetched — {len(sheet_data_section)} chars", flush=True)
-
     # Cap sections — system prompt ~850 tokens, output ~1500 tokens,
     # links_section is tiny, leaving ~3500 tokens for the rest of the user message.
     #
@@ -711,7 +661,6 @@ async def evaluate_gate(gate, task, tier_override=None):
         f"{links_section}\n\n"
         f"Description:\n{description}\n\n"
         f"Comments (closing notes, QA sign-offs, evidence, sub-comments):\n{comments_text_capped}\n\n"
-        f"Google Sheet Data (fetched live — use this as validation evidence):\n{sheet_data_section if sheet_data_section else 'None (sheet private or no sheets linked)'}\n\n"
         f"Attachments (actual content read):\n{attachment_info_capped}\n\n"
         f"Subtasks ({subtask_count} total — full details):\n{subtask_info_capped}\n\n"
         f"Custom Fields:\n{custom_fields_info}"
@@ -844,7 +793,7 @@ async def revert_status(task_id, status) -> bool:
             return False
 
 
-def format_comment(gate, content, score, passed, prior_failures=0, reverted_to=None, auto_promoted=False):
+def format_comment(gate, content, score, passed, prior_failures=0, reverted_to=None):
     """Parse LLM output and render a clean, structured ClickUp comment."""
 
     # ── extract pieces from LLM response ──────────────────────────────────
@@ -872,8 +821,6 @@ def format_comment(gate, content, score, passed, prior_failures=0, reverted_to=N
     ]
     if reverted_to:
         lines.append(f"🔁 **Status reverted to:** `{reverted_to}`")
-    if auto_promoted:
-        lines.append(f"🚀 **Auto-promoted to:** `complete`")
     lines.append("")
 
     # ── checks table ────────────────────────────────────────────────────────
@@ -1133,52 +1080,14 @@ async def process_webhook(payload):
     folder_id = str((task.get("folder") or {}).get("id", ""))
     print(f"[AGENT] Folder ID: {folder_id} | In scope: {folder_id in ENFORCEMENT_FOLDERS}", flush=True)
     if folder_id not in ENFORCEMENT_FOLDERS:
-        # Out-of-scope folders: skip all webhook events silently.
-        # But if someone explicitly typed /si check, still run a dry-run so they get a response.
-        is_explicit_check = False
-        if event == "taskCommentPosted" and history_items:
-            item = history_items[0]
-            comment_obj = (
-                item.get("comment")
-                or (item.get("data") or {}).get("comment")
-                or {}
-            )
-            raw_text = (extract_comment_text(comment_obj) or extract_comment_text(item) or "").strip()
-            is_explicit_check = _is_trigger(raw_text)
-        if not is_explicit_check:
-            print(f"[AGENT] Skipping — not in scope", flush=True)
-            return
-        print(f"[AGENT] Out-of-scope folder but explicit /si check — running advisory dry-run", flush=True)
+        print(f"[AGENT] Skipping — not in scope", flush=True)
+        return
 
     status = (task.get("status") or {}).get("status", "")
     previous_status = ""
     if history_items:
         before = history_items[0].get("before") or {}
         previous_status = (before.get("status", "") if isinstance(before, dict) else "") or ""
-
-    # Inactive tickets — SI has nothing to gate on. Webhook events skip silently;
-    # manual /si check gets a one-liner so the user knows SI saw it.
-    if status.lower() in INACTIVE_STATUSES:
-        print(f"[AGENT] Skipping — inactive status: {status}", flush=True)
-        if event == "taskCommentPosted":
-            # Need trigger_comment_id to reply in the right thread — peek at history
-            trigger_comment_id = None
-            if history_items:
-                item = history_items[0]
-                comment_obj = (
-                    item.get("comment")
-                    or (item.get("data") or {}).get("comment")
-                    or {}
-                )
-                own_id    = (comment_obj.get("id") if isinstance(comment_obj, dict) else None) or item.get("id") or None
-                parent_id = (comment_obj.get("parent") if isinstance(comment_obj, dict) else None) or None
-                trigger_comment_id = parent_id or own_id
-            await post_comment(
-                task_id,
-                f"⏸️ **SubInspector — Skipped**\nTicket status is **{status}** — gate checks don't apply to inactive tickets.",
-                reply_to_comment_id=trigger_comment_id
-            )
-        return
 
     gate, is_dry_run, trigger_comment_id, tier_override = determine_gate(event, status, history_items)
 
@@ -1217,36 +1126,21 @@ async def process_webhook(payload):
     # Count actual ✅ PASS entries — more reliable than trusting the LLM's stated SCORE.
     checks_match = re.search(r"CHECKS:\n(.*?)(?=\nSUMMARY:|\nMASTER TICKET:|$)", content, re.DOTALL)
     if checks_match:
-        # Match both "✅ PASS" and plain "PASS" in table cells — LLM sometimes omits the emoji
-        score = str(len(re.findall(r'\|\s*✅?\s*PASS\b', checks_match.group(1))))
+        score = str(checks_match.group(1).count("✅ PASS"))
     else:
         score_match = re.search(r"SCORE:\s*(\d+)/6", content, re.IGNORECASE)
         score = score_match.group(1) if score_match else "0"
 
     passed = int(score) == 6
 
-    # ── AUTO-PROMOTE ───────────────────────────────────────────────────────────
-    # CLOSURE gate passed 6/6 on an in-scope ticket that isn't already complete →
-    # move it to complete automatically so the user doesn't have to.
-    # Out-of-scope folders (advisory dry-run) are excluded.
-    auto_promoted = False
-    if gate == "CLOSURE" and passed and folder_id in ENFORCEMENT_FOLDERS and status.lower() not in ("complete", "done"):
-        print(f"[AGENT] CLOSURE gate PASS — auto-promoting {task_id} to complete", flush=True)
-        auto_promoted = await revert_status(task_id, "complete")
-    # ── END AUTO-PROMOTE ───────────────────────────────────────────────────────
-
     # ── AUTO-COMPLETE ──────────────────────────────────────────────────────────
-    # When all failing CLOSURE checks are soft formalities SI can write itself
-    # (closing note, stakeholder mention, docs N/A), SI fills the gaps automatically.
-    # Three cases:
-    #   A) /si check on complete/done (dry-run) → post closing note, no status change
-    #   B) Webhook on non-complete (e.g. prod-review → qa) → post note + move to complete
-    #   C) Webhook moved ticket directly to complete but gate failed → fall through to revert
-    if gate == "CLOSURE" and not passed:
+    # When CLOSURE gate scores 5/6 and the one failing check is a soft formality
+    # (closing note, stakeholder mention, docs N/A), SI writes the missing
+    # content, posts it, and moves the ticket to complete automatically.
+    if gate == "CLOSURE" and not passed and status.lower() not in ("complete", "done"):
         can_fix, failing_checks = _can_auto_complete(int(score), content)
-        already_complete = status.lower() in ("complete", "done")
-        if can_fix and (is_dry_run or not already_complete):
-            print(f"[AGENT] Auto-fill triggered — soft gaps: {failing_checks} | already_complete={already_complete} | dry_run={is_dry_run}", flush=True)
+        if can_fix:
+            print(f"[AGENT] Auto-complete triggered — soft gaps: {failing_checks}", flush=True)
             closing_note = await generate_auto_closing_note(task, comments_text_for_note)
             if closing_note:
                 for _tp in _TRIGGER_PATTERNS:
@@ -1257,30 +1151,18 @@ async def process_webhook(payload):
                     f"_Auto-generated by SubInspector based on ticket context and comments._",
                     reply_to_comment_id=trigger_comment_id
                 )
-                if is_dry_run and already_complete:
-                    # Case A: manual /si check on complete — fill gap, leave status alone
-                    await post_comment(
-                        task_id,
-                        f"🤖 **SubInspector — Gaps Filled** | Score {score}/6 → 6/6\n\n"
-                        f"The remaining gap(s) (`{'`, `'.join(failing_checks)}`) were formalities SI could fill.\n"
-                        f"Closing note posted above. Ticket remains **complete**. ✅",
-                        reply_to_comment_id=trigger_comment_id
-                    )
-                else:
-                    # Case B: webhook on non-complete status — move ticket to complete
-                    moved = await revert_status(task_id, "complete")
-                    status_line = "✅ Ticket moved to **complete**." if moved else "⚠️ Could not update status — please move manually."
-                    await post_comment(
-                        task_id,
-                        f"🤖 **SubInspector — Auto-Completed** | Score {score}/6\n\n"
-                        f"The only gap (`{'`, `'.join(failing_checks)}`) was a formality SI could fill.\n"
-                        f"Closing note posted above. {status_line}",
-                        reply_to_comment_id=trigger_comment_id
-                    )
-                print(f"[AGENT] Auto-fill done for {task_id}", flush=True)
+                moved = await revert_status(task_id, "complete")
+                status_line = "✅ Ticket moved to **complete**." if moved else "⚠️ Could not update status — please move manually."
+                await post_comment(
+                    task_id,
+                    f"🤖 **SubInspector — Auto-Completed** | Score {score}/6\n\n"
+                    f"The only gap (`{'`, `'.join(failing_checks)}`) was a formality SI could fill.\n"
+                    f"Closing note posted above. {status_line}",
+                    reply_to_comment_id=trigger_comment_id
+                )
+                print(f"[AGENT] Auto-complete done for {task_id}", flush=True)
                 return
-            print(f"[AGENT] Auto-fill: note generation failed — falling back to normal FAIL flow", flush=True)
-        # Case C: webhook moved ticket to complete but hard failures exist → fall through to revert
+            print(f"[AGENT] Auto-complete: note generation failed — falling back to normal FAIL flow", flush=True)
     # ── END AUTO-COMPLETE ──────────────────────────────────────────────────────
 
     prior_failures = 0 if passed else await count_subinspector_failures(task_id, raw_comments=raw_comments)
@@ -1296,6 +1178,6 @@ async def process_webhook(payload):
         if not success:
             print(f"[AGENT] ⚠️ Revert failed — comment will NOT claim status was changed", flush=True)
 
-    comment = format_comment(gate, content, score, passed, prior_failures, reverted_to=reverted_to, auto_promoted=auto_promoted)
+    comment = format_comment(gate, content, score, passed, prior_failures, reverted_to=reverted_to)
 
     await post_comment(task_id, comment, reply_to_comment_id=trigger_comment_id)
