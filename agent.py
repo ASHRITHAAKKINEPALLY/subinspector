@@ -202,7 +202,42 @@ def _process_table_embeds(text: str) -> str:
                 lines.append("• " + " | ".join(pairs))
         return "\n".join(lines) if lines else "[table: empty]"
 
-    return re.sub(r'\[table-embed:(.*?)\]', _process, text, flags=re.DOTALL)
+    # Use a manual scanner instead of a greedy/lazy regex so that ']' characters
+    # inside cell values (e.g. BQ array syntax or notes) don't truncate the match.
+    # Strategy: after '[table-embed:' find the LAST ']' on the same logical block
+    # by scanning forward until the next '[table-embed:' or a ']' that is followed
+    # by whitespace / '[' / end-of-string (the natural block terminator pattern).
+    result = []
+    i = 0
+    marker = "[table-embed:"
+    while i < len(text):
+        start = text.find(marker, i)
+        if start == -1:
+            result.append(text[i:])
+            break
+        result.append(text[i:start])
+        # Scan for the closing ']' — prefer the one immediately before the next
+        # '[table-embed:' or end-of-string so we capture the full block.
+        content_start = start + len(marker)
+        next_block = text.find(marker, content_start)
+        search_end = next_block if next_block != -1 else len(text)
+        # Walk backwards from search_end to find the last ']' in this block
+        close = text.rfind("]", content_start, search_end)
+        if close == -1:
+            # No closing bracket found — emit verbatim and stop processing
+            result.append(text[start:])
+            i = len(text)
+        else:
+            content = text[content_start:close]
+            # Build a fake match-like object so _process can use m.group(1) / m.group(0)
+            class _M:
+                def __init__(self, g0, g1):
+                    self._g = [g0, g1]
+                def group(self, n):
+                    return self._g[n]
+            result.append(_process(_M(text[start:close + 1], content)))
+            i = close + 1
+    return "".join(result)
 
 
 def extract_comment_text(obj):
@@ -279,11 +314,13 @@ def determine_gate(event, status, history_items):
         return "INTAKE", False, None, None
 
     # Status change → enforce gate, revert if it fails (is_dry_run=False)
+    # IMPORTANT: check CLOSURE first — "ready to close" contains "ready" (a PRE-EXEC
+    # substring) so checking PRE-EXEC first would mis-route it to the wrong gate.
     if event == "taskStatusUpdated":
-        if any(s in status for s in PRE_EXEC_STATUSES):
-            return "PRE-EXECUTION", False, None, None
-        elif any(s in status for s in CLOSURE_STATUSES):
+        if any(s in status for s in CLOSURE_STATUSES):
             return "CLOSURE", False, None, None
+        elif any(s in status for s in PRE_EXEC_STATUSES):
+            return "PRE-EXECUTION", False, None, None
 
     # Manual si check comment → report only, never revert (is_dry_run=True)
     if event == "taskCommentPosted":
@@ -312,15 +349,17 @@ def determine_gate(event, status, history_items):
             tier_override = tier_match.group(1).upper()
 
         if _is_trigger(comment_text):
-            if any(s in status for s in PRE_EXEC_STATUSES):
-                return "PRE-EXECUTION", True, trigger_comment_id, tier_override
-            elif any(s in status for s in CLOSURE_STATUSES):
+            # IMPORTANT: check CLOSURE first — "ready to close" contains "ready"
+            # (a PRE-EXEC substring), so checking PRE-EXEC first would mis-route it.
+            if any(s in status for s in CLOSURE_STATUSES):
                 # If the ticket is already at a terminal "done" state, just report —
                 # never revert a ticket that's already been marked complete/done.
                 # Enforcement (revert on fail) only applies to non-final closure
                 # statuses like prod-review, uat, qa.
                 already_done = status in ("complete", "done")
                 return "CLOSURE", already_done, trigger_comment_id, tier_override
+            elif any(s in status for s in PRE_EXEC_STATUSES):
+                return "PRE-EXECUTION", True, trigger_comment_id, tier_override
             else:
                 return "INTAKE", True, trigger_comment_id, tier_override
         else:
@@ -661,7 +700,7 @@ async def evaluate_gate(gate, task, tier_override=None):
     is_bi = (
         task_name.lower().startswith("[bi]")
         or any(kw in task_name.lower() for kw in bi_keywords)
-        or any(kw in (task.get("description") or "").lower()[:500] for kw in bi_keywords)
+        or any(kw in (task.get("description") or "").lower()[:1000] for kw in bi_keywords)
     )
     bi_line = "Ticket Type: BI — use the BI-specific checklist, NOT the generic checklist.\n" if is_bi else "Ticket Type: DE (non-BI) — use the generic checklist.\n"
     print(f"[AGENT] BI detected: {is_bi}", flush=True)
@@ -890,8 +929,13 @@ def format_comment(gate, content, score, passed, prior_failures=0, reverted_to=N
     return "\n".join(lines)
 
 
-async def count_subinspector_failures(task_id, raw_comments=None):
-    """Count prior SubInspector FAIL comments. Accepts pre-fetched comments to avoid a duplicate API call."""
+async def count_subinspector_failures(task_id, gate=None, raw_comments=None):
+    """Count prior SubInspector FAIL comments for a specific gate.
+
+    gate: "INTAKE" | "PRE-EXECUTION" | "CLOSURE" (or None to count across all gates — not recommended).
+    Counting per-gate avoids escalating to BA lead on a CLOSURE check just because
+    the ticket previously failed PRE-EXECUTION twice.
+    """
     try:
         if raw_comments is None:
             async with httpx.AsyncClient(timeout=15) as client:
@@ -903,8 +947,11 @@ async def count_subinspector_failures(task_id, raw_comments=None):
         count = 0
         for c in raw_comments:
             text = extract_comment_text(c)
-            # Match only the bot's own structured failure comments by their signature header
-            if "🤖 **SubInspector" in text and "❌" in text:
+            # Match only the bot's own structured failure comments by their signature header.
+            # If gate is specified, only count failures from the same gate so that
+            # repeated failures at one gate don't inflate the failure counter at another.
+            gate_marker = f"SubInspector — {gate} Gate" if gate else "SubInspector"
+            if gate_marker in text and "❌" in text:
                 count += 1
         return count
     except Exception:
@@ -961,7 +1008,7 @@ async def generate_auto_closing_note(task: dict, comments_text: str) -> str:
     today       = datetime.date.today().strftime("%b %d, %Y")
     task_name   = task.get("name", "")
     assignees   = ", ".join(a.get("username", "") for a in task.get("assignees", [])) or "team"
-    description = (task.get("description") or "")[:1500]
+    description = _process_table_embeds(task.get("description") or "")[:1500]
     stakeholder = _resolve_stakeholder(task)
 
     prompt = f"""You are writing a professional closing note for a ClickUp ticket on behalf of the team lead.
@@ -1003,7 +1050,7 @@ Important rules:
                 headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
                 json={
                     "model": "llama-3.1-8b-instant",
-                    "temperature": 0.15,
+                    "temperature": 0,
                     "max_tokens": 400,
                     "messages": [{"role": "user", "content": prompt}]
                 }
@@ -1141,8 +1188,6 @@ async def process_webhook(payload):
     for _tp in _TRIGGER_PATTERNS:
         content = _tp.sub("[re-check command]", content)
 
-    result_match = re.search(r"RESULT:\s*(PASS|FAIL)", content, re.IGNORECASE)
-
     # Count actual ✅ PASS entries — more reliable than trusting the LLM's stated SCORE.
     checks_match = re.search(r"CHECKS:\n(.*?)(?=\nSUMMARY:|\nMASTER TICKET:|$)", content, re.DOTALL)
     if checks_match:
@@ -1185,7 +1230,7 @@ async def process_webhook(payload):
             print(f"[AGENT] Auto-complete: note generation failed — falling back to normal FAIL flow", flush=True)
     # ── END AUTO-COMPLETE ──────────────────────────────────────────────────────
 
-    prior_failures = 0 if passed else await count_subinspector_failures(task_id, raw_comments=raw_comments)
+    prior_failures = 0 if passed else await count_subinspector_failures(task_id, gate=gate, raw_comments=raw_comments)
     if not passed and prior_failures >= 2:
         print(f"[AGENT] Anti-loop triggered after {prior_failures + 1} failures — escalating to BA lead", flush=True)
 
