@@ -489,6 +489,15 @@ async def fetch_all_replies(comment_id, client, depth=1):
             user = (r.get("user") or {}).get("username", "unknown")
             text = extract_comment_text(r)
             reply_id = r.get("id", "")
+            # Skip bot eval sub-comments — same filter as fetch_comments top-level.
+            # Without this, bot gate reports posted as replies re-enter LLM context.
+            if text and "🤖 **SubInspector" in text and (
+                "Gate**" in text or "SCORE:" in text or "Auto-Completed" in text
+            ):
+                if reply_id:
+                    sub_replies = await fetch_all_replies(reply_id, client, depth + 1)
+                    lines.extend(sub_replies)
+                continue
             if text:
                 lines.append(f"{indent}↳ [{user}]: {text}")
             if reply_id:
