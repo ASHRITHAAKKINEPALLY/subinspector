@@ -1220,14 +1220,14 @@ async def process_webhook(payload):
         score_match = re.search(r"SCORE:\s*(\d+)/6", content, re.IGNORECASE)
         score = score_match.group(1) if score_match else "0"
 
-    passed = int(score) == 6
+    passed = int(score.strip()) == 6
 
     # ── AUTO-COMPLETE ──────────────────────────────────────────────────────────
     # When CLOSURE gate scores 5/6 and the one failing check is a soft formality
     # (closing note, stakeholder mention, docs N/A), SI writes the missing
     # content, posts it, and moves the ticket to complete automatically.
     if gate == "CLOSURE" and not passed and status.lower() not in ("complete", "done"):
-        can_fix, failing_checks = _can_auto_complete(int(score), content)
+        can_fix, failing_checks = _can_auto_complete(int(score.strip()), content)
         if can_fix:
             print(f"[AGENT] Auto-complete triggered — soft gaps: {failing_checks}", flush=True)
             closing_note = await generate_auto_closing_note(task, comments_text_for_note)
