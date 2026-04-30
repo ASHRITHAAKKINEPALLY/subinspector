@@ -444,7 +444,7 @@ async def read_attachment(url, filename):
             # Image — use Groq vision to describe
             elif ext in ("png", "jpg", "jpeg", "gif", "webp"):
                 b64 = base64.b64encode(raw).decode()
-                mime = "image/png" if ext == "png" else "image/jpeg"
+                mime = {"png": "image/png", "gif": "image/gif", "webp": "image/webp"}.get(ext, "image/jpeg")
                 async with httpx.AsyncClient(timeout=30) as vc:
                     vr = await vc.post(
                         GROQ_URL,
