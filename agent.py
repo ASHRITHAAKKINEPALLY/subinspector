@@ -808,14 +808,19 @@ async def evaluate_gate(gate, task, tier_override=None):
 async def post_comment(task_id, comment, reply_to_comment_id=None):
     """Post a comment on a task. If reply_to_comment_id is set, try to post as a reply inside
     that thread first; if the reply API call fails for any reason, fall back to a top-level
-    comment so the message is never silently dropped."""
+    comment so the message is never silently dropped.
+
+    comment: str → sent as plain comment_text (for simple error/status messages)
+             list → sent as rich-text comment block array (for formatted gate reports)
+    """
+    payload = {"comment": comment} if isinstance(comment, list) else {"comment_text": comment}
     async with httpx.AsyncClient(timeout=15) as client:
         if reply_to_comment_id:
             try:
                 resp = await client.post(
                     f"{CLICKUP_BASE}/comment/{reply_to_comment_id}/reply",
                     headers={"Authorization": CLICKUP_API_KEY, "Content-Type": "application/json"},
-                    json={"comment_text": comment}
+                    json=payload
                 )
                 if resp.status_code < 300:
                     print(f"[AGENT] Reply posted to comment {reply_to_comment_id} (status {resp.status_code})", flush=True)
@@ -828,7 +833,7 @@ async def post_comment(task_id, comment, reply_to_comment_id=None):
         resp = await client.post(
             f"{CLICKUP_BASE}/task/{task_id}/comment",
             headers={"Authorization": CLICKUP_API_KEY, "Content-Type": "application/json"},
-            json={"comment_text": comment}
+            json=payload
         )
         if resp.status_code < 300:
             print(f"[AGENT] Top-level comment posted on task {task_id} (status {resp.status_code})", flush=True)
@@ -853,10 +858,10 @@ async def revert_status(task_id, status) -> bool:
 
 
 def format_comment(gate, content, score, passed, prior_failures=0, reverted_to=None):
-    """Parse LLM output and render a clean, structured ClickUp comment."""
+    """Parse LLM output and return a ClickUp rich-text comment block array."""
 
     # ── extract pieces from LLM response ──────────────────────────────────
-    tier_match   = re.search(r"TIER:\s*(.+)", content)
+    tier_match    = re.search(r"TIER:\s*(.+)", content)
     summary_match = re.search(r"SUMMARY:\s*(.+)", content)
     checks_match  = re.search(r"CHECKS:\n(.*?)(?=\nSUMMARY:|\nMASTER TICKET:|$)", content, re.DOTALL)
     master_match  = re.search(r"(MASTER TICKET:.*)", content, re.DOTALL)
@@ -866,67 +871,74 @@ def format_comment(gate, content, score, passed, prior_failures=0, reverted_to=N
     checks_table = checks_match.group(1).strip()  if checks_match  else ""
     master_block = master_match.group(1).strip()  if master_match  else ""
 
-    # ── header ─────────────────────────────────────────────────────────────
     result_emoji = "✅" if passed else "❌"
     result_word  = "PASS" if passed else "FAIL"
 
-    lines = [
-        "---",
-        f"🤖 **SubInspector — {gate} Gate**",
-        "---",
-        "",
-        f"**🏷 Tier:** {tier_line}",
-        f"**📊 Score:** {score}/6  |  {result_emoji} **{result_word}**",
+    # ── header ─────────────────────────────────────────────────────────────
+    blocks = [
+        {"text": f"🤖 SubInspector — {gate} Gate\n", "attributes": {"bold": True}},
+        {"text": "\n"},
+        {"text": "🏷 Tier: ", "attributes": {"bold": True}},
+        {"text": f"{tier_line}\n"},
+        {"text": "📊 Score: ", "attributes": {"bold": True}},
+        {"text": f"{score}/6  |  {result_emoji} {result_word}\n"},
     ]
     if reverted_to:
-        lines.append(f"🔁 **Status reverted to:** `{reverted_to}`")
-    lines.append("")
+        blocks += [
+            {"text": "🔁 Status reverted to: ", "attributes": {"bold": True}},
+            {"text": f"{reverted_to}\n"},
+        ]
+    blocks.append({"text": "\n"})
 
     # ── checks table ────────────────────────────────────────────────────────
     if checks_table:
-        lines += [
-            "**Gate Checks**",
-            "",
-            checks_table,
-            "",
+        blocks += [
+            {"text": "Gate Checks\n", "attributes": {"bold": True}},
+            {"text": "\n"},
+            {"text": checks_table + "\n"},
+            {"text": "\n"},
         ]
 
     # ── summary ─────────────────────────────────────────────────────────────
     if summary:
-        lines += [
-            "---",
-            f"📝 **Summary:** {summary}",
+        blocks += [
+            {"text": "📝 Summary: ", "attributes": {"bold": True}},
+            {"text": f"{summary}\n"},
         ]
 
     # ── next steps / escalation ─────────────────────────────────────────────
     if not passed:
-        lines += ["", "---"]
+        blocks.append({"text": "\n"})
         if prior_failures == 0:
-            lines += [
-                "💡 **Next Steps**",
-                "- Fix every ❌ check listed above",
-                "- Once updated, trigger a SubInspector re-check to re-evaluate",
+            blocks += [
+                {"text": "💡 Next Steps\n", "attributes": {"bold": True}},
+                {"text": "  -  Fix every ❌ check listed above\n"},
+                {"text": "  -  Once updated, trigger a SubInspector re-check to re-evaluate\n"},
             ]
         elif prior_failures == 1:
-            lines += [
-                "⚠️ **2nd Failure — BA Lead Consult Required**",
-                "- This ticket has failed SubInspector gate checks **twice**",
-                "- Please discuss with **@Komal Saraogi** before making further changes",
-                "- Fix all ❌ checks above, then trigger a re-check to retry",
+            blocks += [
+                {"text": "⚠️ 2nd Failure — BA Lead Consult Required\n", "attributes": {"bold": True}},
+                {"text": "  -  This ticket has failed SubInspector gate checks twice\n"},
+                {"text": "  -  Please discuss with @Komal Saraogi before making further changes\n"},
+                {"text": "  -  Fix all ❌ checks above, then trigger a re-check to retry\n"},
             ]
         else:
-            lines += [
-                f"🚨 **Repeated Failure ({prior_failures + 1} total) — Enforcement Suspended**",
-                f"- **@Komal Saraogi** — manual review required before this ticket can proceed",
-                "- Automatic gate enforcement is paused; the team must resolve this manually",
+            blocks += [
+                {"text": f"🚨 Repeated Failure ({prior_failures + 1} total) — Enforcement Suspended\n", "attributes": {"bold": True}},
+                {"text": "  -  @Komal Saraogi — manual review required before this ticket can proceed\n"},
+                {"text": "  -  Automatic gate enforcement is paused; the team must resolve this manually\n"},
             ]
 
     # ── master ticket scope analysis ────────────────────────────────────────
     if master_block:
-        lines += ["", "---", "**📋 Master Ticket Scope Analysis**", "", master_block]
+        blocks += [
+            {"text": "\n"},
+            {"text": "📋 Master Ticket Scope Analysis\n", "attributes": {"bold": True}},
+            {"text": "\n"},
+            {"text": master_block + "\n"},
+        ]
 
-    lines += ["", "---"]
-    return "\n".join(lines)
+    return blocks
 
 
 async def count_subinspector_failures(task_id, gate=None, raw_comments=None):
