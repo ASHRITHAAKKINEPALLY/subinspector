@@ -1181,13 +1181,13 @@ async def process_webhook(payload):
     in_scope = folder_id in ENFORCEMENT_FOLDERS
     print(f"[AGENT] Folder ID: {folder_id} | In scope: {in_scope}", flush=True)
     if not in_scope:
-        if event not in ("taskCommentPosted", "taskCreated"):
-            # taskStatusUpdated outside scope: never revert or enforce.
+        if event not in ("taskCommentPosted", "taskCreated", "taskStatusUpdated"):
             print(f"[AGENT] Skipping — not in scope (event={event})", flush=True)
             return
-        # taskCreated or taskCommentPosted outside scope → advisory-only mode.
-        # taskCreated: run INTAKE check, post compact report, no status changes.
-        # taskCommentPosted: only proceed if an /si check trigger is found (checked after determine_gate).
+        # All three events run in advisory-only mode outside ENFORCEMENT_FOLDERS:
+        # taskCreated        → advisory INTAKE check on ticket creation
+        # taskStatusUpdated  → advisory gate check when status changes (no revert)
+        # taskCommentPosted  → advisory gate check on /si check trigger only
         print(f"[AGENT] Out-of-scope folder — advisory mode (event={event})", flush=True)
 
     advisory_mode = not in_scope
