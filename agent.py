@@ -1181,14 +1181,14 @@ async def process_webhook(payload):
     in_scope = folder_id in ENFORCEMENT_FOLDERS
     print(f"[AGENT] Folder ID: {folder_id} | In scope: {in_scope}", flush=True)
     if not in_scope:
-        if event != "taskCommentPosted":
-            # Automatic events (taskCreated, taskStatusUpdated) only enforce inside
-            # the configured ENFORCEMENT_FOLDERS.
+        if event not in ("taskCommentPosted", "taskCreated"):
+            # taskStatusUpdated outside scope: never revert or enforce.
             print(f"[AGENT] Skipping — not in scope (event={event})", flush=True)
             return
-        # taskCommentPosted outside scope: allow /si check through in advisory-only mode.
-        # We will confirm a trigger exists after determine_gate; if gate is None, we skip.
-        print(f"[AGENT] Out-of-scope folder — advisory mode for manual /si check", flush=True)
+        # taskCreated or taskCommentPosted outside scope → advisory-only mode.
+        # taskCreated: run INTAKE check, post compact report, no status changes.
+        # taskCommentPosted: only proceed if an /si check trigger is found (checked after determine_gate).
+        print(f"[AGENT] Out-of-scope folder — advisory mode (event={event})", flush=True)
 
     advisory_mode = not in_scope
 
@@ -1200,8 +1200,8 @@ async def process_webhook(payload):
 
     gate, is_dry_run, trigger_comment_id, tier_override = determine_gate(event, status, history_items)
 
-    # Advisory-mode tasks must have a real /si check trigger — if determine_gate
-    # found no trigger (gate=None) the comment was not a SubInspector command.
+    # For advisory taskCommentPosted, gate=None means no /si check trigger — skip.
+    # For advisory taskCreated, determine_gate always returns INTAKE so gate won't be None.
     if advisory_mode and not gate:
         print(f"[AGENT] Out-of-scope task — no /si check trigger found, skipping", flush=True)
         return
