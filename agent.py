@@ -866,8 +866,12 @@ async def revert_status(task_id, status) -> bool:
             return False
 
 
-def format_comment(gate, content, score, passed, prior_failures=0, reverted_to=None):
-    """Parse LLM output and return a ClickUp rich-text comment block array."""
+def format_comment(gate, content, score, passed, prior_failures=0, reverted_to=None, advisory=False):
+    """Parse LLM output and return a ClickUp rich-text comment block array.
+
+    advisory=True: compact report for out-of-scope tasks — no status revert,
+    no escalation, no next-steps. Just the gate result + per-check gaps.
+    """
 
     # ── extract pieces from LLM response ──────────────────────────────────
     tier_match    = re.search(r"TIER:\s*(.+)", content)
@@ -886,6 +890,10 @@ def format_comment(gate, content, score, passed, prior_failures=0, reverted_to=N
     # ── header ─────────────────────────────────────────────────────────────
     blocks = [
         {"text": f"🤖 SubInspector — {gate} Gate\n", "attributes": {"bold": True}},
+    ]
+    if advisory:
+        blocks.append({"text": "🔍 Advisory mode — outside Instant Hydration folder. No status changes made.\n"})
+    blocks += [
         {"text": "\n"},
         {"text": "🏷 Tier: ", "attributes": {"bold": True}},
         {"text": f"{tier_line}\n"},
@@ -916,7 +924,8 @@ def format_comment(gate, content, score, passed, prior_failures=0, reverted_to=N
         ]
 
     # ── next steps / escalation ─────────────────────────────────────────────
-    if not passed:
+    # Skipped in advisory mode — no enforcement, just per-check gap feedback.
+    if not passed and not advisory:
         blocks.append({"text": "\n"})
         if prior_failures == 0:
             blocks += [
@@ -1169,10 +1178,19 @@ async def process_webhook(payload):
         return
 
     folder_id = str((task.get("folder") or {}).get("id", ""))
-    print(f"[AGENT] Folder ID: {folder_id} | In scope: {folder_id in ENFORCEMENT_FOLDERS}", flush=True)
-    if folder_id not in ENFORCEMENT_FOLDERS:
-        print(f"[AGENT] Skipping — not in scope", flush=True)
-        return
+    in_scope = folder_id in ENFORCEMENT_FOLDERS
+    print(f"[AGENT] Folder ID: {folder_id} | In scope: {in_scope}", flush=True)
+    if not in_scope:
+        if event != "taskCommentPosted":
+            # Automatic events (taskCreated, taskStatusUpdated) only enforce inside
+            # the configured ENFORCEMENT_FOLDERS.
+            print(f"[AGENT] Skipping — not in scope (event={event})", flush=True)
+            return
+        # taskCommentPosted outside scope: allow /si check through in advisory-only mode.
+        # We will confirm a trigger exists after determine_gate; if gate is None, we skip.
+        print(f"[AGENT] Out-of-scope folder — advisory mode for manual /si check", flush=True)
+
+    advisory_mode = not in_scope
 
     status = (task.get("status") or {}).get("status", "")
     previous_status = ""
@@ -1182,13 +1200,24 @@ async def process_webhook(payload):
 
     gate, is_dry_run, trigger_comment_id, tier_override = determine_gate(event, status, history_items)
 
+    # Advisory-mode tasks must have a real /si check trigger — if determine_gate
+    # found no trigger (gate=None) the comment was not a SubInspector command.
+    if advisory_mode and not gate:
+        print(f"[AGENT] Out-of-scope task — no /si check trigger found, skipping", flush=True)
+        return
+
+    # Advisory mode: always dry-run, never touch status or fields.
+    if advisory_mode:
+        is_dry_run = True
+        print(f"[AGENT] Advisory mode — enforcement disabled, reporting only", flush=True)
+
     # For CLOSURE gate with no previous_status (e.g. manual /si check), use the
     # revert map so enforcement still works even without a webhook history entry.
-    if gate == "CLOSURE" and not previous_status:
+    if gate == "CLOSURE" and not previous_status and not advisory_mode:
         previous_status = CLOSURE_REVERT_MAP.get(status.lower(), "")
         if previous_status:
             print(f"[AGENT] No previous_status in payload — CLOSURE_REVERT_MAP: '{status}' → '{previous_status}'", flush=True)
-    print(f"[AGENT] Gate: {gate} | Status: {status} | Reply to: {trigger_comment_id} | Tier override: {tier_override}", flush=True)
+    print(f"[AGENT] Gate: {gate} | Status: {status} | Advisory: {advisory_mode} | Reply to: {trigger_comment_id} | Tier override: {tier_override}", flush=True)
 
     if not gate:
         print(f"[AGENT] No gate matched — skipping", flush=True)
@@ -1226,7 +1255,8 @@ async def process_webhook(payload):
     # When CLOSURE gate scores 5/6 and the one failing check is a soft formality
     # (closing note, stakeholder mention, docs N/A), SI writes the missing
     # content, posts it, and moves the ticket to complete automatically.
-    if gate == "CLOSURE" and not passed and status.lower() not in ("complete", "done"):
+    # Disabled in advisory mode — never modify tasks outside ENFORCEMENT_FOLDERS.
+    if not advisory_mode and gate == "CLOSURE" and not passed and status.lower() not in ("complete", "done"):
         can_fix, failing_checks = _can_auto_complete(int(score.strip()), content)
         if can_fix:
             print(f"[AGENT] Auto-complete triggered — soft gaps: {failing_checks}", flush=True)
@@ -1254,11 +1284,15 @@ async def process_webhook(payload):
             print(f"[AGENT] Auto-complete: note generation failed — falling back to normal FAIL flow", flush=True)
     # ── END AUTO-COMPLETE ──────────────────────────────────────────────────────
 
-    prior_failures = 0 if passed else await count_subinspector_failures(task_id, gate=gate, raw_comments=raw_comments)
-    if not passed and prior_failures >= 2:
-        print(f"[AGENT] Anti-loop triggered after {prior_failures + 1} failures — escalating to BA lead", flush=True)
+    # Failure escalation and status revert are enforcement-only actions.
+    # In advisory mode (out-of-scope tasks) we skip both.
+    prior_failures = 0
+    if not passed and not advisory_mode:
+        prior_failures = await count_subinspector_failures(task_id, gate=gate, raw_comments=raw_comments)
+        if prior_failures >= 2:
+            print(f"[AGENT] Anti-loop triggered after {prior_failures + 1} failures — escalating to BA lead", flush=True)
 
-    can_revert = not passed and not is_dry_run and bool(previous_status)
+    can_revert = not passed and not is_dry_run and bool(previous_status) and not advisory_mode
     reverted_to = None
     if can_revert:
         print(f"[AGENT] Reverting status to: {previous_status}", flush=True)
@@ -1267,6 +1301,6 @@ async def process_webhook(payload):
         if not success:
             print(f"[AGENT] ⚠️ Revert failed — comment will NOT claim status was changed", flush=True)
 
-    comment = format_comment(gate, content, score, passed, prior_failures, reverted_to=reverted_to)
+    comment = format_comment(gate, content, score, passed, prior_failures, reverted_to=reverted_to, advisory=advisory_mode)
 
     await post_comment(task_id, comment, reply_to_comment_id=trigger_comment_id)
