@@ -44,7 +44,7 @@ Apply the checklist for the gate that will fire next based on the ticket's curre
 | 1 | Problem Statement | User-story format: "As a [persona] at IH, I want [capability], so that [value]." Must name the metric/area + a value-realization signal. Never just restate the title. |
 | 2 | Steps to Reproduce | Explicit nav path + filter/date range + which view/report + which number to look at. Followable by a new person without a meeting. |
 | 3 | Definition of Done | Observable end state — what artifact/output will change and exactly how to confirm it is complete. Never "fix it" or "update logic". |
-| 4 | Screenshots / Evidence | Attach or link proof: screenshot, export, query result, or before/after numbers. Required whenever the claim depends on UI or output differences. |
+| 4 | Screenshots / Evidence | **INTAKE ONLY:** work has not started, so finished output does NOT exist yet. PASS if any of: (a) screenshot of the current/broken state, (b) description or sample of expected output format (table columns, sample rows, metric + formula), (c) mockup or wireframe. FAIL only if the ticket claims data/UI is wrong AND has zero screenshot, zero format example, zero mockup of any kind. |
 | 5 | Mandatory Fields | All required fields present and non-empty. Description must have substantive content under each heading, not just the heading itself. |
 | 6 | DE Actionability | Full BigQuery path (project.dataset.table) where data work is involved. No TBD language. All dependencies recorded. Actionable without a clarifying meeting. |
 
@@ -54,7 +54,7 @@ Apply the checklist for the gate that will fire next based on the ticket's curre
 3. Full BQ path confirmed (project.dataset.table)
 4. KPIs/metrics defined with calculation logic or BRD reference
 5. Definition of Done — what the finished dashboard shows + how sign-off is given
-6. Screenshot / mockup / wireframe attached
+6. Screenshot / mockup / wireframe — PASS if mockup, wireframe, sample layout, or reference screenshot of a similar report is attached or described. FAIL only if there is zero visual reference or output format description.
 
 ---
 

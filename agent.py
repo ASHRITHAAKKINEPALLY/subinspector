@@ -97,7 +97,7 @@ INTAKE GATE — Generic (6 checks):
 1. Title-Description Coherence — title and problem statement describe the SAME entity. FAIL if mismatch even if related.
 2. Steps to Reproduce / Context — new person can understand without a meeting: navigation, filters, date range, context.
 3. Definition of Done — explicit, observable end state stated. FAIL if vague ("fix it") or unmeasurable.
-4. Screenshots/Evidence — evidence attached/linked to verify starting state. FAIL if absent when UI/output claim made.
+4. Screenshots/Evidence — INTAKE ONLY RULE: work has NOT started yet, so finished output does NOT exist. PASS if any of these are present: (a) screenshot of the current/broken state showing the problem, (b) description or sample of expected output format (table columns, sample rows, metric name + formula), (c) mockup or wireframe. FAIL ONLY if the ticket makes a claim about wrong/missing data or a UI issue AND has absolutely no screenshot, no format description, and no example of any kind.
 5. Mandatory Fields — Problem Statement, Expected Output, Definition of Done, Data Source all present and non-empty.
 6. DE Actionability — expected output clear, full BQ path provided, no TBDs. Actionable without a meeting.
 
@@ -107,7 +107,7 @@ INTAKE GATE — BI Tickets (use instead of Generic when BI ticket detected):
 3. Data source confirmed with full BigQuery path.
 4. KPIs/Metrics defined with calculation logic or spec/BRD reference.
 5. Definition of Done — what the finished dashboard shows and how sign-off is given.
-6. Screenshot/Mockup/Wireframe attached as evidence of expected output.""",
+6. Screenshot/Mockup/Wireframe — PASS if mockup, wireframe, sample layout description, or screenshot of an existing similar report is attached or described. FAIL only if there is absolutely no visual reference or output format description of any kind.""",
 
     "PRE-EXECUTION": """
 PRE-EXECUTION GATE — Generic (6 checks):
