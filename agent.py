@@ -13,9 +13,25 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 CLICKUP_API_KEY = os.environ.get("CLICKUP_API_KEY")
 ENFORCEMENT_FOLDERS = os.environ.get("ENFORCEMENT_FOLDERS", "90165998786").split(",")
 
+# Client folders that get advisory gate checks (comment only, no status changes).
+# Defaults cover all known external client folders; override via ADVISORY_FOLDERS env var.
+_DEFAULT_ADVISORY = ",".join([
+    "90161200308",  # HexClad
+    "90161875051",  # Saxx
+    "90169023555",  # Bboutique
+    "90167972037",  # Naked & Thriving (N&T)
+    "90169078001",  # Javvy Coffee
+    "90164305799",  # Yum Brands
+    "90160230070",  # Momentous Projects
+    "90020845754",  # BPN - BarePerformanceNutrition (Consulting)
+    "90160770330",  # BPN (DE)
+])
+ADVISORY_FOLDERS = os.environ.get("ADVISORY_FOLDERS", _DEFAULT_ADVISORY).split(",")
+
 print(f"[AGENT] Startup check — GROQ_API_KEY={'SET (' + GROQ_API_KEY[:8] + '...)' if GROQ_API_KEY else 'MISSING ⚠️'}", flush=True)
 print(f"[AGENT] Startup check — CLICKUP_API_KEY={'SET (' + CLICKUP_API_KEY[:8] + '...)' if CLICKUP_API_KEY else 'MISSING ⚠️'}", flush=True)
 print(f"[AGENT] Startup check — ENFORCEMENT_FOLDERS={ENFORCEMENT_FOLDERS}", flush=True)
+print(f"[AGENT] Startup check — ADVISORY_FOLDERS={ADVISORY_FOLDERS}", flush=True)
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 CLICKUP_BASE = "https://api.clickup.com/api/v2"
@@ -1178,17 +1194,24 @@ async def process_webhook(payload):
         return
 
     folder_id = str((task.get("folder") or {}).get("id", ""))
-    in_scope = folder_id in ENFORCEMENT_FOLDERS
-    print(f"[AGENT] Folder ID: {folder_id} | In scope: {in_scope}", flush=True)
+    in_scope    = folder_id in ENFORCEMENT_FOLDERS
+    in_advisory = folder_id in ADVISORY_FOLDERS
+    print(f"[AGENT] Folder ID: {folder_id} | Enforcement: {in_scope} | Advisory: {in_advisory}", flush=True)
+
+    if not in_scope and not in_advisory:
+        # Folder is neither an enforcement target nor a known client advisory folder — skip.
+        print(f"[AGENT] Skipping — folder not in enforcement or advisory list", flush=True)
+        return
+
     if not in_scope:
+        # Advisory folder: comment only, no status changes, no escalation.
+        # taskStatusUpdated → gate check for new status (no revert)
+        # taskCreated       → INTAKE check
+        # taskCommentPosted → gate check on /si check trigger only (checked after determine_gate)
         if event not in ("taskCommentPosted", "taskCreated", "taskStatusUpdated"):
-            print(f"[AGENT] Skipping — not in scope (event={event})", flush=True)
+            print(f"[AGENT] Skipping — advisory folder, unhandled event={event}", flush=True)
             return
-        # All three events run in advisory-only mode outside ENFORCEMENT_FOLDERS:
-        # taskCreated        → advisory INTAKE check on ticket creation
-        # taskStatusUpdated  → advisory gate check when status changes (no revert)
-        # taskCommentPosted  → advisory gate check on /si check trigger only
-        print(f"[AGENT] Out-of-scope folder — advisory mode (event={event})", flush=True)
+        print(f"[AGENT] Advisory mode (event={event})", flush=True)
 
     advisory_mode = not in_scope
 
