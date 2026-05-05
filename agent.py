@@ -1380,3 +1380,150 @@ async def process_webhook(payload):
     comment = format_comment(gate, content, score, passed, prior_failures, reverted_to=reverted_to, advisory=advisory_mode)
 
     await post_comment(task_id, comment, reply_to_comment_id=trigger_comment_id)
+
+
+# ── Backfill / missed-ticket scan ─────────────────────────────────────────────
+
+async def has_gate_comment(task_id: str, gate: str, raw_comments=None) -> bool:
+    """Return True if SubInspector has already posted a gate comment for this gate."""
+    try:
+        if raw_comments is None:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.get(
+                    f"{CLICKUP_BASE}/task/{task_id}/comment",
+                    headers={"Authorization": CLICKUP_API_KEY}
+                )
+                raw_comments = resp.json().get("comments", [])
+        gate_marker = f"SubInspector — {gate} Gate"
+        for c in raw_comments:
+            text = extract_comment_text(c)
+            if gate_marker in text:
+                return True
+        return False
+    except Exception:
+        return False
+
+
+async def fetch_folder_tasks(folder_id: str) -> list:
+    """Fetch all tasks across every list in a folder, paginating automatically."""
+    all_tasks = []
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.get(
+                f"{CLICKUP_BASE}/folder/{folder_id}/list",
+                headers={"Authorization": CLICKUP_API_KEY}
+            )
+            lists = resp.json().get("lists", [])
+            print(f"[SCAN] Found {len(lists)} lists in folder {folder_id}", flush=True)
+
+            for lst in lists:
+                list_id   = lst.get("id")
+                list_name = lst.get("name", "?")
+                page      = 0
+                list_count = 0
+                while True:
+                    tr = await client.get(
+                        f"{CLICKUP_BASE}/list/{list_id}/task",
+                        headers={"Authorization": CLICKUP_API_KEY},
+                        params={
+                            "include_closed": "true",
+                            "subtasks": "true",
+                            "page": page,
+                        }
+                    )
+                    page_tasks = tr.json().get("tasks", [])
+                    all_tasks.extend(page_tasks)
+                    list_count += len(page_tasks)
+                    if len(page_tasks) < 100:   # ClickUp max 100/page
+                        break
+                    page += 1
+                print(f"[SCAN]   List '{list_name}' ({list_id}): {list_count} tasks", flush=True)
+    except Exception as e:
+        print(f"[SCAN] fetch_folder_tasks failed: {e}", flush=True)
+    return all_tasks
+
+
+async def scan_and_backfill(folder_id: str = None, dry_run: bool = False) -> dict:
+    """
+    Scan every task in the IH folder. For each task:
+      1. Determine which gate should have fired for the current status.
+      2. Check whether SubInspector already posted that gate's comment.
+      3. If not — evaluate and post (no status revert for backfills).
+
+    dry_run=True  → identify missed tickets only, don't post anything.
+    Returns a summary dict.
+    """
+    target_folder = folder_id or ENFORCEMENT_FOLDERS[0]
+    print(f"[SCAN] Starting backfill — folder={target_folder} dry_run={dry_run}", flush=True)
+
+    tasks = await fetch_folder_tasks(target_folder)
+    print(f"[SCAN] Total tasks to evaluate: {len(tasks)}", flush=True)
+
+    results = {
+        "scanned": 0,
+        "already_covered": 0,
+        "missed": 0,
+        "posted": 0,
+        "errors": 0,
+    }
+    missed_list = []
+
+    for task in tasks:
+        task_id   = task.get("id", "")
+        task_name = task.get("name", "")
+        status    = (task.get("status") or {}).get("status", "").lower()
+        results["scanned"] += 1
+
+        # Determine the expected gate for the current status
+        if any(s in status for s in CLOSURE_STATUSES):
+            expected_gate = "CLOSURE"
+        elif any(s in status for s in PRE_EXEC_STATUSES):
+            expected_gate = "PRE-EXECUTION"
+        else:
+            expected_gate = "INTAKE"
+
+        already = await has_gate_comment(task_id, expected_gate)
+        if already:
+            results["already_covered"] += 1
+            continue
+
+        results["missed"] += 1
+        missed_list.append({"id": task_id, "name": task_name, "status": status, "gate": expected_gate})
+        print(f"[SCAN] MISSED — {task_id} | '{task_name[:60]}' | status={status} | gate={expected_gate}", flush=True)
+
+        if dry_run:
+            continue
+
+        try:
+            full_task = await fetch_task(task_id)
+            content, raw_comments, _ = await evaluate_gate(expected_gate, full_task)
+
+            # Strip any trigger phrase the LLM may have hallucinated
+            for _tp in _TRIGGER_PATTERNS:
+                content = _tp.sub("[re-check command]", content)
+
+            checks_match = re.search(r"CHECKS:\n(.*?)(?=\nSUMMARY:|\nMASTER TICKET:|$)", content, re.DOTALL)
+            if checks_match:
+                score = str(checks_match.group(1).count("✅ PASS"))
+            else:
+                score_match = re.search(r"SCORE:\s*(\d+)/6", content, re.IGNORECASE)
+                score = score_match.group(1) if score_match else "0"
+
+            passed        = int(score.strip()) == 6
+            prior_failures = await count_subinspector_failures(task_id, gate=expected_gate, raw_comments=raw_comments)
+
+            # Backfill comments never revert status — ticket may have moved on since
+            comment = format_comment(expected_gate, content, score, passed, prior_failures, reverted_to=None)
+            await post_comment(task_id, comment)
+            results["posted"] += 1
+            print(f"[SCAN] Posted {expected_gate} gate on {task_id} — score={score}/6 passed={passed}", flush=True)
+
+            await asyncio.sleep(1)   # gentle rate-limit buffer between posts
+
+        except Exception as e:
+            results["errors"] += 1
+            print(f"[SCAN] Error on {task_id}: {e}", flush=True)
+
+    results["missed_tickets"] = missed_list
+    print(f"[SCAN] Done — {results}", flush=True)
+    return results

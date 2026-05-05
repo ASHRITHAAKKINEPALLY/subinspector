@@ -1,6 +1,6 @@
-from fastapi import FastAPI, Request, BackgroundTasks
+from fastapi import FastAPI, Request, BackgroundTasks, Query
 from contextlib import asynccontextmanager
-from agent import process_webhook, CLICKUP_API_KEY
+from agent import process_webhook, scan_and_backfill, CLICKUP_API_KEY, ENFORCEMENT_FOLDERS
 import traceback
 import asyncio
 import os
@@ -88,6 +88,36 @@ async def run_webhook(payload):
     except Exception as e:
         print(f"[ERROR] {e}", flush=True)
         traceback.print_exc()
+
+@app.post("/scan")
+async def scan_tickets(
+    background_tasks: BackgroundTasks,
+    dry_run: bool = Query(default=False, description="Set true to identify missed tickets without posting comments"),
+    folder_id: str = Query(default=None, description="ClickUp folder ID to scan (defaults to IH enforcement folder)")
+):
+    """
+    Scan all tasks in the IH folder and post gate comments for any that were missed.
+    Missed = task has no SubInspector comment matching its current gate.
+    No status reverts — backfill is comment-only.
+    """
+    target = folder_id or ENFORCEMENT_FOLDERS[0]
+    background_tasks.add_task(run_scan, target, dry_run)
+    return {"status": "scan started", "folder_id": target, "dry_run": dry_run}
+
+
+async def run_scan(folder_id: str, dry_run: bool):
+    try:
+        results = await scan_and_backfill(folder_id, dry_run=dry_run)
+        print(
+            f"[SCAN] Complete — scanned={results['scanned']} "
+            f"missed={results['missed']} posted={results['posted']} "
+            f"errors={results['errors']}",
+            flush=True
+        )
+    except Exception as e:
+        print(f"[SCAN ERROR] {e}", flush=True)
+        traceback.print_exc()
+
 
 @app.get("/health")
 async def health():
