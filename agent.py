@@ -286,6 +286,14 @@ def extract_comment_text(obj):
 
     # --- 2. Rich-text block scanning (always run even if plain_text found) ----
     blocks = obj.get("comment") or []
+    # ClickUp sometimes nests the comment object as a dict under the "comment" key
+    # (e.g. webhook history item: {"comment": {"comment_text": "...", "id": "..."}}).
+    # Recurse into it to extract text; don't treat it as a block list.
+    if isinstance(blocks, dict):
+        nested = extract_comment_text(blocks)
+        if nested and not plain_text:
+            plain_text = nested
+        blocks = []  # no block-list to scan further
     block_parts = []
     block_urls  = []
     if isinstance(blocks, list):
