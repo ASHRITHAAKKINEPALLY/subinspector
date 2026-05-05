@@ -584,7 +584,7 @@ async def evaluate_gate(gate, task, tier_override=None):
     # • Large tables (>10 rows) → compact summary so they don't eat the char budget
     # • Small tables → human-readable text so BQ paths / KPI specs are visible to the LLM
     raw_description = task.get("description") or ""
-    description = _process_table_embeds(raw_description)[:6000]
+    description = _process_table_embeds(raw_description)[:3500]
     assignees = ", ".join(a.get("username", "") for a in task.get("assignees", [])) or "None"
     list_name = (task.get("list") or {}).get("name", "")
     folder_name = (task.get("folder") or {}).get("name", "")
@@ -704,8 +704,8 @@ async def evaluate_gate(gate, task, tier_override=None):
     # IMPORTANT: use first-2000 + last-2000 so we always see BOTH the oldest
     # evidence (e.g. Feb validation sheet) AND the most recent closure notes.
     # A simple head-cap would cut off recent notes when there are many SI comments.
-    _COMMENT_HEAD = 2000
-    _COMMENT_TAIL = 2000
+    _COMMENT_HEAD = 1200
+    _COMMENT_TAIL = 1200
     if len(comments_text) > (_COMMENT_HEAD + _COMMENT_TAIL):
         comments_text_capped = (
             comments_text[:_COMMENT_HEAD]
@@ -714,8 +714,8 @@ async def evaluate_gate(gate, task, tier_override=None):
         )
     else:
         comments_text_capped = comments_text
-    attachment_info_capped = attachment_info[:2500]
-    subtask_info_capped    = subtask_info[:1500]
+    attachment_info_capped = attachment_info[:1500]
+    subtask_info_capped    = subtask_info[:800]
 
     is_master = subtask_count > 0
 
@@ -750,9 +750,10 @@ async def evaluate_gate(gate, task, tier_override=None):
         f"Custom Fields:\n{custom_fields_info}"
     )
 
-    # Hard cap — system ~850 tokens + output ~1500 tokens + user ~3500 tokens = ~5850 total, under 6k TPM
-    if len(user_message) > 13000:
-        user_message = user_message[:13000] + "\n\n[TRUNCATED]"
+    # Hard cap — CLOSURE system prompt ~1300 tokens + output 1500 tokens + user must stay under ~3200 tokens
+    # 3200 tokens × 3.5 chars/token ≈ 11200 chars. Cap at 9000 for a safe margin.
+    if len(user_message) > 9000:
+        user_message = user_message[:9000] + "\n\n[TRUNCATED]"
 
     if not GROQ_API_KEY:
         raise ValueError("GROQ_API_KEY environment variable is not set")
