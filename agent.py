@@ -11,11 +11,25 @@ from docx import Document
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 CLICKUP_API_KEY = os.environ.get("CLICKUP_API_KEY")
-ENFORCEMENT_FOLDERS = os.environ.get("ENFORCEMENT_FOLDERS", "90165998786").split(",")
 
-# Client folders that get advisory gate checks (comment only, no status changes).
-# Defaults cover all known external client folders; override via ADVISORY_FOLDERS env var.
-_DEFAULT_ADVISORY = ",".join([
+# ── Scope configuration ───────────────────────────────────────────────────────
+# Three levels of matching (checked in order, OR logic):
+#   1. folder.id  — matches tasks in a specific ClickUp folder
+#   2. list.id    — fallback for tasks whose folder.id = "none" (list directly in space)
+#   3. space.id   — broadest: matches ANY task (including master tickets) in the space
+#
+# ENFORCEMENT = full gate enforcement + revert (IH only)
+# ADVISORY    = comment-only gate checks, no revert (external clients)
+#
+# SPACES are the most important for master tickets: master/epic tickets often
+# live in a "Backlogs" or "Master Tickets" list that has a different folder.id
+# than sprint lists. Setting the space ID catches them automatically.
+
+ENFORCEMENT_FOLDERS = os.environ.get("ENFORCEMENT_FOLDERS", "90165998786").split(",")
+ENFORCEMENT_SPACES  = [x.strip() for x in os.environ.get("ENFORCEMENT_SPACES", "").split(",") if x.strip()]
+
+# Client folders/spaces for advisory mode (comment only, no status changes).
+_DEFAULT_ADVISORY_FOLDERS = ",".join([
     "90161200308",  # HexClad
     "90161875051",  # Saxx
     "90169023555",  # Bboutique
@@ -26,12 +40,15 @@ _DEFAULT_ADVISORY = ",".join([
     "90020845754",  # BPN - BarePerformanceNutrition (Consulting)
     "90160770330",  # BPN (DE)
 ])
-ADVISORY_FOLDERS = os.environ.get("ADVISORY_FOLDERS", _DEFAULT_ADVISORY).split(",")
+ADVISORY_FOLDERS = os.environ.get("ADVISORY_FOLDERS", _DEFAULT_ADVISORY_FOLDERS).split(",")
+ADVISORY_SPACES  = [x.strip() for x in os.environ.get("ADVISORY_SPACES", "").split(",") if x.strip()]
 
 print(f"[AGENT] Startup check — GROQ_API_KEY={'SET (' + GROQ_API_KEY[:8] + '...)' if GROQ_API_KEY else 'MISSING ⚠️'}", flush=True)
 print(f"[AGENT] Startup check — CLICKUP_API_KEY={'SET (' + CLICKUP_API_KEY[:8] + '...)' if CLICKUP_API_KEY else 'MISSING ⚠️'}", flush=True)
 print(f"[AGENT] Startup check — ENFORCEMENT_FOLDERS={ENFORCEMENT_FOLDERS}", flush=True)
+print(f"[AGENT] Startup check — ENFORCEMENT_SPACES={ENFORCEMENT_SPACES or '(not set — add via HF secret to catch master tickets)'}", flush=True)
 print(f"[AGENT] Startup check — ADVISORY_FOLDERS={ADVISORY_FOLDERS}", flush=True)
+print(f"[AGENT] Startup check — ADVISORY_SPACES={ADVISORY_SPACES or '(not set — add via HF secret to catch master tickets)'}", flush=True)
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 CLICKUP_BASE = "https://api.clickup.com/api/v2"
@@ -1214,16 +1231,26 @@ async def process_webhook(payload):
     folder_id = str((task.get("folder") or {}).get("id", ""))
     list_id   = str((task.get("list")   or {}).get("id", ""))
     space_id  = str((task.get("space")  or {}).get("id", ""))
-    # Check folder first, then list as fallback — master/epic tickets often live in a
-    # different list than their subtasks, so their folder.id differs from the enforcement
-    # folder. Checking list.id catches them when ENFORCEMENT_FOLDERS contains a list ID.
-    in_scope    = folder_id in ENFORCEMENT_FOLDERS or list_id in ENFORCEMENT_FOLDERS
-    in_advisory = folder_id in ADVISORY_FOLDERS    or list_id in ADVISORY_FOLDERS
+
+    # Three-level scope check (OR logic):
+    #   folder.id → catches regular sprint/project tasks
+    #   list.id   → fallback for tasks whose folder.id = "none" (list directly in space)
+    #   space.id  → broadest: catches master/epic tickets in any folder within the space
+    in_scope = (
+        folder_id in ENFORCEMENT_FOLDERS
+        or list_id in ENFORCEMENT_FOLDERS
+        or (bool(ENFORCEMENT_SPACES) and space_id in ENFORCEMENT_SPACES)
+    )
+    in_advisory = (
+        folder_id in ADVISORY_FOLDERS
+        or list_id in ADVISORY_FOLDERS
+        or (bool(ADVISORY_SPACES) and space_id in ADVISORY_SPACES)
+    )
     print(f"[AGENT] Folder: {folder_id} | List: {list_id} | Space: {space_id} | Enforcement: {in_scope} | Advisory: {in_advisory}", flush=True)
 
     if not in_scope and not in_advisory:
-        # Neither folder nor list is an enforcement/advisory target — skip.
-        print(f"[AGENT] Skipping — folder/list not in enforcement or advisory list", flush=True)
+        # None of folder / list / space matched — skip entirely.
+        print(f"[AGENT] Skipping — folder/list/space not in any enforcement or advisory set", flush=True)
         return
 
     if not in_scope:

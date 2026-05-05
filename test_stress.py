@@ -101,47 +101,87 @@ g, _, _, _ = agent.determine_gate("taskDeleted", "in progress", [])
 check("Unknown event → no gate", g is None, f"got {g}")
 
 # ─────────────────────────────────────────────────────────────────────────────
-section("2. Scope Check — folder.id AND list.id matching (main ticket fix)")
+section("2. Scope Check — folder / list / space (3-level OR logic)")
 # ─────────────────────────────────────────────────────────────────────────────
 
 IH_FOLDER = "90165998786"
+IH_SPACE  = "IH_SPACE_ID"   # placeholder — set via ENFORCEMENT_SPACES in HF secrets
+EXT_SPACE = "EXT_SPACE_ID"  # placeholder — set via ADVISORY_SPACES in HF secrets
 
-# Normal case: folder_id matches
-folder_id, list_id = IH_FOLDER, "some_list"
-in_scope = folder_id in agent.ENFORCEMENT_FOLDERS or list_id in agent.ENFORCEMENT_FOLDERS
-check("Main task: folder_id=IH → in_scope=True", in_scope)
+def _scope(folder, lst, space, enf_folders, enf_spaces, adv_folders, adv_spaces):
+    in_scope = (
+        folder in enf_folders
+        or lst in enf_folders
+        or (bool(enf_spaces) and space in enf_spaces)
+    )
+    in_advisory = (
+        folder in adv_folders
+        or lst in adv_folders
+        or (bool(adv_spaces) and space in adv_spaces)
+    )
+    return in_scope, in_advisory
 
-# Master ticket case: folder_id=none but list_id matches
-folder_id, list_id = "none", IH_FOLDER
-in_scope = folder_id in agent.ENFORCEMENT_FOLDERS or list_id in agent.ENFORCEMENT_FOLDERS
-check("Master ticket: folder_id='none', list_id=IH → in_scope=True", in_scope)
+EF = agent.ENFORCEMENT_FOLDERS
+ES = [IH_SPACE]              # simulate ENFORCEMENT_SPACES set
+AF = agent.ADVISORY_FOLDERS
+AS_ = [EXT_SPACE]            # simulate ADVISORY_SPACES set
 
-# Neither matches → skip
-folder_id, list_id = "99999999", "88888888"
-in_scope = folder_id in agent.ENFORCEMENT_FOLDERS or list_id in agent.ENFORCEMENT_FOLDERS
-check("Unknown folder AND list → in_scope=False", not in_scope)
+# --- Level 1: folder.id ---
+in_sc, in_adv = _scope(IH_FOLDER, "other", "space_x", EF, [], AF, [])
+check("L1 folder.id=IH → in_scope=True", in_sc)
 
-# Advisory folder in folder_id
-folder_id, list_id = "90161200308", "other"  # HexClad
-in_advisory = folder_id in agent.ADVISORY_FOLDERS or list_id in agent.ADVISORY_FOLDERS
-check("HexClad in folder_id → in_advisory=True", in_advisory)
+in_sc, in_adv = _scope("90161200308", "other", "space_x", EF, [], AF, [])
+check("L1 folder.id=HexClad → in_advisory=True", in_adv and not in_sc)
 
-# Advisory folder in list_id (folder_id=none)
-folder_id, list_id = "none", "90161875051"  # Saxx
-in_advisory = folder_id in agent.ADVISORY_FOLDERS or list_id in agent.ADVISORY_FOLDERS
-check("Saxx in list_id (folder='none') → in_advisory=True", in_advisory)
+# --- Level 2: list.id fallback (folder=none) ---
+in_sc, in_adv = _scope("none", IH_FOLDER, "space_x", EF, [], AF, [])
+check("L2 list.id=IH, folder=none → in_scope=True", in_sc)
 
-# Enforcement folder should NOT trigger advisory
-folder_id, list_id = IH_FOLDER, "other"
-in_scope    = folder_id in agent.ENFORCEMENT_FOLDERS or list_id in agent.ENFORCEMENT_FOLDERS
-in_advisory = folder_id in agent.ADVISORY_FOLDERS    or list_id in agent.ADVISORY_FOLDERS
-check("IH folder → in_scope=True, in_advisory=False", in_scope and not in_advisory)
+in_sc, in_adv = _scope("none", "90161875051", "space_x", EF, [], AF, [])
+check("L2 list.id=Saxx, folder=none → in_advisory=True", in_adv and not in_sc)
 
-# Both folder and list unknown → both False
-folder_id, list_id = "bad1", "bad2"
-in_scope    = folder_id in agent.ENFORCEMENT_FOLDERS or list_id in agent.ENFORCEMENT_FOLDERS
-in_advisory = folder_id in agent.ADVISORY_FOLDERS    or list_id in agent.ADVISORY_FOLDERS
-check("Both unknown → skip (not in_scope, not in_advisory)", not in_scope and not in_advisory)
+# --- Level 3: space.id (master ticket in different folder/list) ---
+in_sc, in_adv = _scope("other_folder", "other_list", IH_SPACE, EF, ES, AF, [])
+check("L3 space.id=IH_SPACE, folder/list unknown → in_scope=True", in_sc)
+
+in_sc, in_adv = _scope("other_folder", "other_list", EXT_SPACE, EF, [], AF, AS_)
+check("L3 space.id=EXT_SPACE, folder/list unknown → in_advisory=True", in_adv and not in_sc)
+
+# Master ticket in IH — all three levels tested
+in_sc, in_adv = _scope(IH_FOLDER, "master_list", IH_SPACE, EF, ES, AF, [])
+check("Master ticket IH: folder + space both match → in_scope=True", in_sc and not in_adv)
+
+in_sc, in_adv = _scope("backlogs_folder", "master_list", IH_SPACE, EF, ES, AF, [])
+check("Master ticket IH: only space matches → in_scope=True", in_sc and not in_adv)
+
+# Master ticket external client
+in_sc, in_adv = _scope("backlogs_folder", "master_list", EXT_SPACE, EF, [], AF, AS_)
+check("Master ticket ext client: only space matches → in_advisory=True", in_adv and not in_sc)
+
+# IH folder should NEVER trigger advisory
+in_sc, in_adv = _scope(IH_FOLDER, "other", "other_space", EF, [], AF, [])
+check("IH folder → in_scope=True, never in_advisory", in_sc and not in_adv)
+
+# Completely unknown task → both False
+in_sc, in_adv = _scope("rand1", "rand2", "rand3", EF, ES, AF, AS_)
+check("Unknown folder/list/space → both False (skip)", not in_sc and not in_adv)
+
+# ENFORCEMENT_SPACES not set → space check skipped (no false positives)
+in_sc, in_adv = _scope("rand1", "rand2", IH_SPACE, EF, [], AF, [])
+check("ENFORCEMENT_SPACES not set → space check inactive", not in_sc)
+
+# ADVISORY_SPACES not set → space check skipped
+in_sc, in_adv = _scope("rand1", "rand2", EXT_SPACE, EF, [], AF, [])
+check("ADVISORY_SPACES not set → space check inactive", not in_adv)
+
+# No overlap: IH never advisory, external never enforcement
+in_sc, in_adv = _scope(IH_FOLDER, IH_FOLDER, IH_SPACE, EF, ES, AF, AS_)
+check("IH: in_scope=True, in_advisory=False always", in_sc and not in_adv)
+
+# ENFORCEMENT_SPACES and ADVISORY_SPACES env vars exist in agent
+check("ENFORCEMENT_SPACES var exists in agent", hasattr(agent, "ENFORCEMENT_SPACES"))
+check("ADVISORY_SPACES var exists in agent", hasattr(agent, "ADVISORY_SPACES"))
+check("Both are lists", isinstance(agent.ENFORCEMENT_SPACES, list) and isinstance(agent.ADVISORY_SPACES, list))
 
 # ─────────────────────────────────────────────────────────────────────────────
 section("3. Revert Maps — PRE-EXECUTION and CLOSURE fallbacks")
