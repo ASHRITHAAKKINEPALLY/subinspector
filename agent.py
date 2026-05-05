@@ -110,7 +110,7 @@ SUMMARY: [one sentence verdict + most critical gap if FAIL]"""
 _GATE_CHECKS = {
     "INTAKE": """
 INTAKE GATE — Generic (6 checks):
-1. Title-Description Coherence — title and problem statement describe the SAME entity. FAIL if mismatch even if related.
+1. Title-Description Coherence — title and problem statement describe the SAME work. PASS if they are about the same general area, entity, or goal even if worded differently or at different levels of detail. FAIL ONLY if the title and description are clearly about two different things (e.g. title says "revenue dashboard" but description is about user churn pipeline).
 2. Steps to Reproduce / Context — new person can understand without a meeting: navigation, filters, date range, context.
 3. Definition of Done — explicit, observable end state stated. FAIL if vague ("fix it") or unmeasurable.
 4. Screenshots/Evidence — INTAKE ONLY RULE: work has NOT started yet, so finished output does NOT exist. PASS if any of these are present: (a) screenshot of the current/broken state showing the problem, (b) description or sample of expected output format (table columns, sample rows, metric name + formula), (c) mockup or wireframe. FAIL ONLY if the ticket makes a claim about wrong/missing data or a UI issue AND has absolutely no screenshot, no format description, and no example of any kind. PLANNING/INITIATIVE EXCEPTION: If the ticket is a planning, strategy, or initiative ticket where the deliverable IS a new artifact to be created (deck, document, presentation, plan, design spec, narrative), PASS this check automatically — no evidence of a non-existent artifact can exist at intake.
