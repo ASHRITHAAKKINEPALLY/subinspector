@@ -39,14 +39,23 @@ CLICKUP_BASE = "https://api.clickup.com/api/v2"
 PRE_EXEC_STATUSES = ["ready", "in progress", "in progess", "development", "code-review", "code review"]
 CLOSURE_STATUSES = ["qa", "uat", "prod review", "prod-review", "complete", "done", "ready to close"]
 
-# When a manual /si check triggers a CLOSURE FAIL and we have no previous_status
-# from the webhook payload, revert to this fallback status.
+# When the webhook payload is missing previous_status, use these maps to
+# determine where to revert. CLOSURE reverts to prod-review; PRE-EXECUTION
+# reverts to "open" (the natural state before work begins).
 CLOSURE_REVERT_MAP = {
     "complete":       "prod-review",
     "done":           "prod-review",
     "ready to close": "prod-review",
     # Tickets already at prod-review/uat/qa are already under review —
     # don't cascade them lower, just post the FAIL comment.
+}
+PRE_EXEC_REVERT_MAP = {
+    "ready":        "open",
+    "in progress":  "open",
+    "in progess":   "open",
+    "development":  "open",
+    "code-review":  "open",
+    "code review":  "open",
 }
 
 # Trigger patterns — require a leading slash so the bot's own next-steps
@@ -1241,6 +1250,9 @@ async def process_webhook(payload):
         previous_status = CLOSURE_REVERT_MAP.get(status.lower(), "")
         if previous_status:
             print(f"[AGENT] No previous_status in payload — CLOSURE_REVERT_MAP: '{status}' → '{previous_status}'", flush=True)
+    if gate == "PRE-EXECUTION" and not previous_status and not advisory_mode:
+        previous_status = PRE_EXEC_REVERT_MAP.get(status.lower(), "open")
+        print(f"[AGENT] No previous_status in payload — PRE_EXEC_REVERT_MAP: '{status}' → '{previous_status}'", flush=True)
     print(f"[AGENT] Gate: {gate} | Status: {status} | Advisory: {advisory_mode} | Reply to: {trigger_comment_id} | Tier override: {tier_override}", flush=True)
 
     if not gate:
