@@ -1204,13 +1204,18 @@ async def process_webhook(payload):
         return
 
     folder_id = str((task.get("folder") or {}).get("id", ""))
-    in_scope    = folder_id in ENFORCEMENT_FOLDERS
-    in_advisory = folder_id in ADVISORY_FOLDERS
-    print(f"[AGENT] Folder ID: {folder_id} | Enforcement: {in_scope} | Advisory: {in_advisory}", flush=True)
+    list_id   = str((task.get("list")   or {}).get("id", ""))
+    space_id  = str((task.get("space")  or {}).get("id", ""))
+    # Check folder first, then list as fallback — master/epic tickets often live in a
+    # different list than their subtasks, so their folder.id differs from the enforcement
+    # folder. Checking list.id catches them when ENFORCEMENT_FOLDERS contains a list ID.
+    in_scope    = folder_id in ENFORCEMENT_FOLDERS or list_id in ENFORCEMENT_FOLDERS
+    in_advisory = folder_id in ADVISORY_FOLDERS    or list_id in ADVISORY_FOLDERS
+    print(f"[AGENT] Folder: {folder_id} | List: {list_id} | Space: {space_id} | Enforcement: {in_scope} | Advisory: {in_advisory}", flush=True)
 
     if not in_scope and not in_advisory:
-        # Folder is neither an enforcement target nor a known client advisory folder — skip.
-        print(f"[AGENT] Skipping — folder not in enforcement or advisory list", flush=True)
+        # Neither folder nor list is an enforcement/advisory target — skip.
+        print(f"[AGENT] Skipping — folder/list not in enforcement or advisory list", flush=True)
         return
 
     if not in_scope:
