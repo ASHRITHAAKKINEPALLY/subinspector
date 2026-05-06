@@ -199,6 +199,56 @@ def get_system_prompt(gate: str) -> str:
     return _SYSTEM_COMMON + "\n" + checks
 
 
+# Regex that matches a BigQuery path: project.dataset.table
+# project = lowercase + hyphens (e.g. pulse-instanthydration)
+# dataset = lowercase + underscores + digits (e.g. instanthydration_4927_prod_raw)
+# table   = any case + underscores + optional wildcard (e.g. Northbeam_Ads_data_*)
+_BQ_PATH_RE = re.compile(
+    r'\b[a-z][a-z0-9-]*\.[a-z][a-z0-9_]+\.[a-zA-Z][a-zA-Z0-9_*-]+\b'
+)
+
+
+def _fix_bq_check_false_fail(content: str, description: str) -> str:
+    """Post-process LLM output: if check #3 is ❌ FAIL but a BQ path
+    (project.dataset.table) is demonstrably present in the ticket description,
+    override it to ✅ PASS.
+
+    This handles the LLM's persistent tendency to fail check #3 on
+    new-build/ingestion tickets even when full target BQ paths are present
+    (e.g. Northbeam ingestion ticket with pulse-instanthydration.dataset.table).
+    """
+    # Only act when a FAIL exists and a BQ path is actually in the description
+    if '❌ FAIL' not in content:
+        return content
+    bq_match = _BQ_PATH_RE.search(description or "")
+    if not bq_match:
+        return content  # no BQ path at all — FAIL is legitimate
+
+    # Flip check #3 row from ❌ FAIL → ✅ PASS
+    def _flip(m):
+        name_col   = m.group(1)   # "| 3 | <check name> |"
+        detail_col = m.group(2)   # "| <old detail> |"
+        bq_found   = bq_match.group(0)[:70]
+        return (
+            f"{name_col} ✅ PASS "
+            f"| BQ path confirmed in description (new-build target path acceptable): {bq_found} |"
+        )
+
+    new_content = re.sub(
+        r'(\| 3 \|[^|]*\|)\s*❌ FAIL\s*(\|[^|]*\|)',
+        _flip,
+        content,
+        count=1
+    )
+    if new_content != content:
+        print(
+            f"[AGENT] BQ path auto-override: check #3 → PASS "
+            f"(found '{bq_match.group(0)[:60]}' in description)",
+            flush=True
+        )
+    return new_content
+
+
 # Threshold: table-embeds with more than this many rows are summarised
 # (they're reference tables — column lists, lookup tables, etc. — not evidence).
 # Small tables (≤ threshold) are formatted as readable text so the LLM can
@@ -1317,6 +1367,11 @@ async def process_webhook(payload):
     for _tp in _TRIGGER_PATTERNS:
         content = _tp.sub("[re-check command]", content)
 
+    # BQ path override: if check #3 ❌ FAIL but a BQ path exists in the description,
+    # the LLM is wrong (new-build/ingestion ticket with target paths). Fix it in Python.
+    _desc_for_bq = _process_table_embeds(task.get("description", "") or "")
+    content = _fix_bq_check_false_fail(content, _desc_for_bq)
+
     # Count actual ✅ PASS entries — more reliable than trusting the LLM's stated SCORE.
     checks_match = re.search(r"CHECKS:\n(.*?)(?=\nSUMMARY:|\nMASTER TICKET:|$)", content, re.DOTALL)
     if checks_match:
@@ -1501,6 +1556,10 @@ async def scan_and_backfill(folder_id: str = None, dry_run: bool = False) -> dic
             # Strip any trigger phrase the LLM may have hallucinated
             for _tp in _TRIGGER_PATTERNS:
                 content = _tp.sub("[re-check command]", content)
+
+            # BQ path override (backfill path)
+            _desc_bq = _process_table_embeds(full_task.get("description", "") or "")
+            content = _fix_bq_check_false_fail(content, _desc_bq)
 
             checks_match = re.search(r"CHECKS:\n(.*?)(?=\nSUMMARY:|\nMASTER TICKET:|$)", content, re.DOTALL)
             if checks_match:
