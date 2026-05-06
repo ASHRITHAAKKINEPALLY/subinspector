@@ -146,7 +146,9 @@ INTAKE GATE — Generic (6 checks):
 INTAKE GATE — BI Tickets (use instead of Generic when BI ticket detected):
 1. Problem Statement names dashboard, target persona, and business value.
 2. BI Tool explicitly specified (Power BI / Tableau + workspace/embed target).
-3. Data source confirmed with full BigQuery path. NEW-BUILD EXCEPTION: If the ticket is building/creating a new BQ table or ingestion pipeline as the deliverable (signals: title or description contains "ingestion", "ingest", "pipeline", "new connector", "new table", "build table", "create table", or BQ paths are labeled "proposed", "target", or "to be created"), PASS if the BQ project and dataset are confirmed and a proposed/target table name is stated — the table does NOT need to exist yet. FAIL only if no BQ project or dataset is mentioned at all.
+3. BQ path confirmed. TWO MODES — determine which applies before scoring:
+   MODE A — EXISTING SOURCE (default): ticket queries/reads an already-existing BQ table → full source path (project.dataset.table) must be present. FAIL if generic or absent.
+   MODE B — NEW BUILD / INGESTION: ticket IS CREATING a new BQ table or ingestion pipeline (signals: title/description contains "ingest", "ingestion", "pipeline", "new connector", "build table", "create table", or description has a section labelled "Target BQ paths" or paths labelled "target"/"proposed"). In MODE B the upstream source is an external system (API, SaaS tool) with no BQ path — that is expected and not a FAIL. Instead PASS if: (a) at least one full target BQ path in the form project.dataset.table (or project.dataset.table_prefix_*) is present in the description or a table, AND (b) the path follows a naming convention (snake_case, source prefix). FAIL in MODE B only if no BQ path of any kind is present anywhere in the description.
 4. KPIs/Metrics defined with calculation logic or spec/BRD reference.
 5. Definition of Done — what the finished dashboard shows and how sign-off is given.
 6. Screenshot/Mockup/Wireframe — PASS if mockup, wireframe, sample layout description, or screenshot of an existing similar report is attached or described. FAIL only if there is absolutely no visual reference or output format description of any kind.""",
@@ -155,7 +157,7 @@ INTAKE GATE — BI Tickets (use instead of Generic when BI ticket detected):
 PRE-EXECUTION GATE — Generic (6 checks):
 1. BA Inputs Complete — all 6 present: problem statement, expected output, scope/edge cases+timeline, validation checks, success criteria, data source+business context. FAIL if any missing or TBD.
 2. Valid DE Assignee — at least one DE person assigned (not Komal/Frido; Anudeep only for BI). FAIL if only PM/BA assigned.
-3. Data Source Confirmed — full BQ path (project.dataset.table). NEW-BUILD EXCEPTION: If the ticket is building/creating a new BQ table or ingestion pipeline (same signals as INTAKE: title/description contains "ingestion", "ingest", "pipeline", "new connector", "new table", paths labeled "proposed/target"), PASS if project + dataset are confirmed and a proposed/target table name is stated. FAIL if generic or absent and no new-build signals present.
+3. BQ path confirmed. Apply same TWO MODES as INTAKE BI check #3: MODE A (existing source) = full source path required; MODE B (new build/ingestion, same signals) = at least one full target BQ path present → PASS. FAIL only if no BQ path exists anywhere in the description.
 4. Feasibility Assessment — technical review comment exists for T2/T3. PASS for T1 if self-evident. FAIL if absent for complex work.
 5. Dependencies Identified and Unblocked — all dependencies recorded with owners and unblocked.
 6. Scope Locked — no TBD/placeholder language in any execution-critical aspect.
