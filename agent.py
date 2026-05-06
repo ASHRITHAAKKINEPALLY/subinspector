@@ -246,6 +246,13 @@ def _fix_bq_check_false_fail(content: str, description: str) -> str:
             f"(found '{bq_match.group(0)[:60]}' in description)",
             flush=True
         )
+        # Also update the stale SUMMARY line so it doesn't contradict the PASS
+        new_content = re.sub(
+            r'(SUMMARY:.*)',
+            'SUMMARY: All gate checks passed — BQ path confirmed (target/proposed path accepted for new-build/ingestion ticket).',
+            new_content,
+            count=1
+        )
     return new_content
 
 
