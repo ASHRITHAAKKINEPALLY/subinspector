@@ -1669,7 +1669,7 @@ async def scan_and_backfill(folder_id: str = None, dry_run: bool = False, since_
             results["posted"] += 1
             print(f"[SCAN] Posted {expected_gate} gate on {task_id} — score={score}/6 passed={passed}", flush=True)
 
-            await asyncio.sleep(1)   # gentle rate-limit buffer between posts
+            await asyncio.sleep(8)   # rate-limit buffer — Groq free tier is 6000 TPM, each ticket ~4000-6000 tokens
 
         except Exception as e:
             results["errors"] += 1
