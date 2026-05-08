@@ -132,6 +132,11 @@ _TRIGGER_PATTERNS = [
 # to prevent the bot from reacting to its own comments.
 BOT_USER_ID = os.environ.get("BOT_USER_ID", "100965864")
 
+# In-flight dedup: prevents the same (task_id, gate) from being evaluated
+# simultaneously when ClickUp delivers duplicate webhooks in parallel.
+# Key: (task_id, gate)  Value: asyncio.Event (set when evaluation completes)
+_IN_FLIGHT: dict = {}
+
 def _is_trigger(text: str) -> bool:
     return any(p.search(text) for p in _TRIGGER_PATTERNS)
 
@@ -1422,6 +1427,16 @@ async def process_webhook(payload):
         print(f"[AGENT] No gate matched — skipping", flush=True)
         return
 
+    # ── Duplicate-webhook dedup ────────────────────────────────────────────────
+    # ClickUp occasionally delivers the same webhook twice in quick succession.
+    # If a (task_id, gate) pair is already being evaluated in parallel, drop this
+    # one — it would race to post a second comment (often 0/6 due to rate limit
+    # on the second LLM call hitting right after the first one consumed the quota).
+    _dedup_key = (task_id, gate)
+    if _dedup_key in _IN_FLIGHT:
+        print(f"[AGENT] Duplicate webhook dropped — {gate} gate for {task_id} already in flight", flush=True)
+        return
+    _IN_FLIGHT[_dedup_key] = True
     try:
         content, raw_comments, comments_text_for_note = await evaluate_gate(gate, task, tier_override=tier_override)
     except Exception as e:
@@ -1434,6 +1449,14 @@ async def process_webhook(payload):
             f"⚠️ SubInspector — {gate} gate check failed.\n`{err_type}: {err_msg}`",
             reply_to_comment_id=trigger_comment_id
         )
+        return
+    finally:
+        _IN_FLIGHT.pop(_dedup_key, None)
+
+    # Guard: if the LLM returned empty or structurally invalid content, do not
+    # post a misleading 0/6 FAIL. Log and bail out silently.
+    if not content or not any(marker in content for marker in ("✅ PASS", "❌ FAIL", "SCORE:")):
+        print(f"[AGENT] LLM returned empty/invalid content for {gate} gate on {task_id} — skipping post", flush=True)
         return
 
     # Strip any trigger phrase the LLM may have hallucinated (loop prevention layer 3).
