@@ -45,48 +45,11 @@ _DEFAULT_ADVISORY_FOLDERS = ",".join([
 ADVISORY_FOLDERS = os.environ.get("ADVISORY_FOLDERS", _DEFAULT_ADVISORY_FOLDERS).split(",")
 ADVISORY_SPACES  = [x.strip() for x in os.environ.get("ADVISORY_SPACES", "").split(",") if x.strip()]
 
-# Populated at startup by _build_advisory_space_map():
-# Maps space_id → "advisory" or "enforcement" so that any NEW folder created
-# within a known client's ClickUp space is automatically caught without a
-# manual config update.
-_ADVISORY_SPACE_IDS: set = set()
-_ENFORCEMENT_SPACE_IDS: set = set()
-
-async def _build_advisory_space_map():
-    """Fetch the parent space for every known advisory/enforcement folder and
-    populate _ADVISORY_SPACE_IDS / _ENFORCEMENT_SPACE_IDS.  Called once at
-    startup — ~10-12 lightweight GET calls, cached for the process lifetime."""
-    global _ADVISORY_SPACE_IDS, _ENFORCEMENT_SPACE_IDS
-    advisory_spaces: set = set()
-    enforcement_spaces: set = set()
-
-    all_folders = [
-        (fid, "advisory")     for fid in ADVISORY_FOLDERS
-    ] + [
-        (fid, "enforcement")  for fid in ENFORCEMENT_FOLDERS
-    ]
-
-    async with httpx.AsyncClient(timeout=10) as client:
-        for folder_id, mode in all_folders:
-            try:
-                resp = await client.get(
-                    f"https://api.clickup.com/api/v2/folder/{folder_id}",
-                    headers={"Authorization": CLICKUP_API_KEY},
-                )
-                data = resp.json()
-                space_id = str((data.get("space") or {}).get("id", ""))
-                if space_id:
-                    if mode == "advisory":
-                        advisory_spaces.add(space_id)
-                    else:
-                        enforcement_spaces.add(space_id)
-            except Exception as exc:
-                print(f"[AGENT] Space map: could not fetch folder {folder_id}: {exc}", flush=True)
-
-    _ADVISORY_SPACE_IDS     = advisory_spaces
-    _ENFORCEMENT_SPACE_IDS  = enforcement_spaces
-    print(f"[AGENT] Space map built — advisory spaces: {_ADVISORY_SPACE_IDS}", flush=True)
-    print(f"[AGENT] Space map built — enforcement spaces: {_ENFORCEMENT_SPACE_IDS}", flush=True)
+# NOTE: Space-level auto-detection was removed.
+# Reason: advisory client folders and unrelated internal folders (e.g. Mashburn)
+# can share the same ClickUp space. Auto-detecting by space_id caused SI to comment
+# on folders it was never configured to watch.
+# New folders must be added explicitly to _DEFAULT_ADVISORY_FOLDERS above.
 
 print(f"[AGENT] Startup check — GROQ_API_KEY={'SET (' + GROQ_API_KEY[:8] + '...)' if GROQ_API_KEY else 'MISSING ⚠️'}", flush=True)
 print(f"[AGENT] Startup check — CLICKUP_API_KEY={'SET (' + CLICKUP_API_KEY[:8] + '...)' if CLICKUP_API_KEY else 'MISSING ⚠️'}", flush=True)
@@ -1349,41 +1312,21 @@ async def process_webhook(payload):
     list_id   = str((task.get("list")   or {}).get("id", ""))
     space_id  = str((task.get("space")  or {}).get("id", ""))
 
-    # Four-level scope check (OR logic):
+    # Three-level scope check (OR logic):
     #   folder.id → catches regular sprint/project tasks
     #   list.id   → fallback for tasks whose folder.id = "none" (list directly in space)
-    #   space.id  → explicit ADVISORY_SPACES / ENFORCEMENT_SPACES env-var override
-    #   _*_SPACE_IDS → auto-derived at startup from known folder → space lookups;
-    #                  catches NEW folders created inside a known client's space
-    #                  without any manual config change.
+    #   space.id  → explicit ADVISORY_SPACES / ENFORCEMENT_SPACES env-var override only
+    # New folders must be added explicitly to _DEFAULT_ADVISORY_FOLDERS.
     in_scope = (
         folder_id in ENFORCEMENT_FOLDERS
         or list_id in ENFORCEMENT_FOLDERS
         or (bool(ENFORCEMENT_SPACES) and space_id in ENFORCEMENT_SPACES)
-        or (bool(_ENFORCEMENT_SPACE_IDS) and space_id in _ENFORCEMENT_SPACE_IDS
-            and folder_id not in ADVISORY_FOLDERS)
     )
     in_advisory = (
         folder_id in ADVISORY_FOLDERS
         or list_id in ADVISORY_FOLDERS
         or (bool(ADVISORY_SPACES) and space_id in ADVISORY_SPACES)
-        or (bool(_ADVISORY_SPACE_IDS) and space_id in _ADVISORY_SPACE_IDS
-            and folder_id not in ENFORCEMENT_FOLDERS)
     )
-
-    # Detect new/unknown folders inside a known client space and warn loudly
-    # so they can be added to the explicit config list.
-    folder_explicitly_known = (
-        folder_id in ADVISORY_FOLDERS or folder_id in ENFORCEMENT_FOLDERS
-        or list_id in ADVISORY_FOLDERS or list_id in ENFORCEMENT_FOLDERS
-    )
-    if (in_scope or in_advisory) and not folder_explicitly_known:
-        print(
-            f"[AGENT] ⚠️  NEW FOLDER DETECTED in known client space — "
-            f"folder_id={folder_id} space_id={space_id}. "
-            f"Add this folder_id to _DEFAULT_ADVISORY_FOLDERS in agent.py.",
-            flush=True
-        )
 
     print(f"[AGENT] Folder: {folder_id} | List: {list_id} | Space: {space_id} | Enforcement: {in_scope} | Advisory: {in_advisory}", flush=True)
 
