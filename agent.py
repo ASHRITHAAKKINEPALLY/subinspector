@@ -109,7 +109,7 @@ def _is_trigger(text: str) -> bool:
 _SYSTEM_COMMON = """You are SubInspector, a ClickUp ticket quality gate enforcer for the Instant Hydration (IH) DE team.
 Evaluate tickets against a 6-point gate checklist. Score each check PASS or FAIL. Pass = 6/6. Never use subjective phrasing.
 
-CRITICAL — IGNORE BOT COMMENTS: Any comment that starts with "🤖 **SubInspector" is an automated bot report from a previous run. DO NOT use these as evidence for any check. DO NOT let prior PASS/FAIL results influence your evaluation. Judge only the ticket description, human comments, and attachments.
+CRITICAL — IGNORE BOT COMMENTS: Any comment that contains "SubInspector" followed by "Gate" or "SCORE:" is an automated bot report from a previous run. DO NOT use these as evidence for any check. DO NOT let prior PASS/FAIL results influence your evaluation. Judge only the ticket description, human comments, and attachments.
 
 TIER CLASSIFICATION (determine first):
 - T1: Label fix, filter change, config tweak. Light gate — description + success criteria sufficient.
@@ -616,9 +616,12 @@ async def fetch_all_replies(comment_id, client, depth=1):
             reply_id = r.get("id", "")
             # Skip bot eval sub-comments — same filter as fetch_comments top-level.
             # Without this, bot gate reports posted as replies re-enter LLM context.
-            if text and "🤖 **SubInspector" in text and (
-                "Gate**" in text or "SCORE:" in text or "Auto-Completed" in text
-            ):
+            # NOTE: bot posts bold text via block attributes, NOT **markdown** — so
+            # text extracted from blocks is "🤖 SubInspector — INTAKE Gate" (no **).
+            # Filter must match the plain text form, not the markdown form.
+            if text and "SubInspector" in text and any(m in text for m in (
+                "INTAKE Gate", "PRE-EXECUTION Gate", "CLOSURE Gate", "SCORE:", "Auto-Completed"
+            )):
                 if reply_id:
                     sub_replies = await fetch_all_replies(reply_id, client, depth + 1)
                     lines.extend(sub_replies)
@@ -655,11 +658,14 @@ async def fetch_comments(task_id):
                 # Skip SubInspector gate-check reports from the LLM context.
                 # They contain ❌/✅ PASS/FAIL tables that confuse the model
                 # when it re-evaluates the same ticket (causes 0/6 or 1/6 phantom scores).
-                # Auto-generated closing notes (no "Gate**" / "SCORE:") are kept —
+                # Auto-generated closing notes (no gate name / "SCORE:") are kept —
                 # they represent real evidence of work completion.
-                if text and "🤖 **SubInspector" in text and (
-                    "Gate**" in text or "SCORE:" in text or "Auto-Completed" in text
-                ):
+                # NOTE: bot posts bold text via block attributes, NOT **markdown** — so
+                # text extracted from blocks is "🤖 SubInspector — INTAKE Gate" (no **).
+                # Filter must match the plain text form, not the markdown form.
+                if text and "SubInspector" in text and any(m in text for m in (
+                    "INTAKE Gate", "PRE-EXECUTION Gate", "CLOSURE Gate", "SCORE:", "Auto-Completed"
+                )):
                     print(f"[AGENT] Skipping bot eval comment from LLM context (user={user})", flush=True)
                     # Still append to lines for link extraction but mark it so we can strip later? No —
                     # just drop it entirely from LLM context; raw_comments keeps it for failure counting.
