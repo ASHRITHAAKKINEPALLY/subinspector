@@ -157,7 +157,7 @@ INTAKE GATE — Generic (6 checks):
 5. Mandatory Fields — Problem Statement, Expected Output, Definition of Done, Data Source all present and non-empty with substantive content. PASS if the BA sections contain clear intent and value even if not formatted as a strict user-story template — do not fail for phrasing style when substance is present.
 6. DE Actionability — expected output clear, BQ path present if DE work is in scope, no TBDs. Actionable without a meeting. PASS AUTOMATICALLY when the ticket involves no data engineering work (no BQ query, no pipeline, no table build, no ingestion, no transformation, no SQL). When DE work IS in scope: scan the entire description for any string matching project.dataset.table (e.g. pulse-instanthydration.dataset.tablename or project.dataset.table_*). PASS if at least one such path is found. Do NOT fail because paths are labeled "proposed"/"target" or have wildcard suffixes — new-build tickets provide target paths before the table exists, and that is acceptable. FAIL only when DE work is explicitly in scope AND no BQ path of any kind appears anywhere in the description.
 
-INTAKE GATE — BI Tickets (use instead of Generic when BI ticket detected):
+INTAKE GATE — BI Tickets (use ONLY when user message says "Ticket Type: BI"):
 1. Problem Statement names dashboard, target persona, and business value.
 2. BI Tool explicitly specified (Power BI / Tableau + workspace/embed target).
 3. BigQuery path present — scan the entire description for any string matching the pattern project.dataset.table (dots between three non-space segments, e.g. pulse-instanthydration.instanthydration_4927_prod_raw.Northbeam_Ads_data_*). PASS if at least one such path is found anywhere. FAIL only if no BQ path of any kind exists in the description. Do NOT fail because paths are labeled "proposed" or "target" or have wildcard suffixes — those are acceptable.
@@ -174,7 +174,7 @@ PRE-EXECUTION GATE — Generic (6 checks):
 5. Dependencies Identified and Unblocked — all dependencies recorded with owners and unblocked.
 6. Scope Locked — no TBD/placeholder language in any execution-critical aspect.
 
-PRE-EXECUTION GATE — BI Tickets (use instead of Generic when BI ticket detected):
+PRE-EXECUTION GATE — BI Tickets (use ONLY when user message says "Ticket Type: BI"):
 1. All 6 BI Intake inputs complete — none TBD.
 2. Valid BI developer assigned (Anudeep counts; PM/BA do not).
 3. Granularity and filters defined (date range, drill-downs, slicers, row-level security).
@@ -197,7 +197,7 @@ IMPORTANT STAKEHOLDER RULE: If the ticket assignee, team lead (Ashritha Akkinepa
 5. Stakeholder Notified — PASS if any team member (assignee, team lead, or anyone) has posted a comment confirming the work is done, even without an explicit @mention. A "Moving ticket to Done 🎉" or equivalent statement counts. FAIL only if there is literally no completion acknowledgment from any team member.
 6. Documentation Updated — updated, linked, or explicitly marked N/A. For bug fixes / logic updates / config changes, or any ticket whose title contains mismatch/discrepancy/gap/fix/bug/logic/validation/incorrect/wrong — PASS automatically (documentation N/A implied by scope). Only FAIL if the ticket is clearly a new feature or dashboard build with no documentation at all.
 
-CLOSURE GATE — BI Tickets (use instead of Generic when BI ticket detected):
+CLOSURE GATE — BI Tickets (use ONLY when user message says "Ticket Type: BI"):
 1. All KPIs validated with before/after numbers or screenshots.
 2. Published dashboard link or final screenshot attached.
 3. Stakeholder/client sign-off confirmed in a comment.
