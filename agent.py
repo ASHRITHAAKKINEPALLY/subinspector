@@ -32,7 +32,8 @@ ENFORCEMENT_SPACES  = [x.strip() for x in os.environ.get("ENFORCEMENT_SPACES", "
 _DEFAULT_ADVISORY_FOLDERS = ",".join([
     "90161200308",  # HexClad
     "90161875051",  # Saxx
-    "90169023555",  # Bboutique
+    "90169023555",  # Bboutique (original folder)
+    "90169104190",  # Bboutique (second folder — found 2026-05-08 via webhook log)
     "90167972037",  # Naked & Thriving (N&T)
     "90169078001",  # Javvy Coffee
     "90164305799",  # Yum Brands
