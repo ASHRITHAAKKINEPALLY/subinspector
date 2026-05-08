@@ -1445,10 +1445,12 @@ async def process_webhook(payload):
         _desc_for_bq = _process_table_embeds(task.get("description", "") or "")
         content = _fix_bq_check_false_fail(content, _desc_for_bq)
 
-        # Count actual ✅ PASS entries — more reliable than trusting the LLM's stated SCORE.
+        # Count ✅ PASS only when it appears as a standalone result-column cell
+        # (surrounded by pipes). Simple .count("✅ PASS") would also catch any
+        # "✅ PASS" text the LLM writes in a Detail column, inflating the score.
         checks_match = re.search(r"CHECKS:\n(.*?)(?=\nSUMMARY:|\nMASTER TICKET:|$)", content, re.DOTALL)
         if checks_match:
-            score = str(checks_match.group(1).count("✅ PASS"))
+            score = str(len(re.findall(r'\|\s*✅\s*PASS\s*\|', checks_match.group(1))))
         else:
             score_match = re.search(r"SCORE:\s*(\d+)/6", content, re.IGNORECASE)
             score = score_match.group(1) if score_match else "0"
@@ -1645,7 +1647,7 @@ async def scan_and_backfill(folder_id: str = None, dry_run: bool = False) -> dic
 
             checks_match = re.search(r"CHECKS:\n(.*?)(?=\nSUMMARY:|\nMASTER TICKET:|$)", content, re.DOTALL)
             if checks_match:
-                score = str(checks_match.group(1).count("✅ PASS"))
+                score = str(len(re.findall(r'\|\s*✅\s*PASS\s*\|', checks_match.group(1))))
             else:
                 score_match = re.search(r"SCORE:\s*(\d+)/6", content, re.IGNORECASE)
                 score = score_match.group(1) if score_match else "0"
