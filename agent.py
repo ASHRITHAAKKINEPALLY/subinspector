@@ -1576,7 +1576,7 @@ async def fetch_folder_tasks(folder_id: str) -> list:
     return all_tasks
 
 
-async def scan_and_backfill(folder_id: str = None, dry_run: bool = False) -> dict:
+async def scan_and_backfill(folder_id: str = None, dry_run: bool = False, since_days: int = None) -> dict:
     """
     Scan every task in the IH folder. For each task:
       1. Determine which gate should have fired for the current status.
@@ -1584,12 +1584,21 @@ async def scan_and_backfill(folder_id: str = None, dry_run: bool = False) -> dic
       3. If not — evaluate and post (no status revert for backfills).
 
     dry_run=True  → identify missed tickets only, don't post anything.
+    since_days=N  → only consider tasks whose date_updated is within the last N days.
     Returns a summary dict.
     """
+    import time as _time
     target_folder = folder_id or ENFORCEMENT_FOLDERS[0]
-    print(f"[SCAN] Starting backfill — folder={target_folder} dry_run={dry_run}", flush=True)
+    since_ms = int((_time.time() - since_days * 86400) * 1000) if since_days else None
+    print(f"[SCAN] Starting backfill — folder={target_folder} dry_run={dry_run} since_days={since_days}", flush=True)
 
     tasks = await fetch_folder_tasks(target_folder)
+
+    if since_ms:
+        before = len(tasks)
+        tasks = [t for t in tasks if int(t.get("date_updated") or 0) >= since_ms]
+        print(f"[SCAN] Date filter: kept {len(tasks)}/{before} tasks updated in last {since_days}d", flush=True)
+
     print(f"[SCAN] Total tasks to evaluate: {len(tasks)}", flush=True)
 
     results = {

@@ -93,7 +93,8 @@ async def run_webhook(payload):
 async def scan_tickets(
     background_tasks: BackgroundTasks,
     dry_run: bool = Query(default=False, description="Set true to identify missed tickets without posting comments"),
-    folder_id: str = Query(default=None, description="ClickUp folder ID to scan (defaults to IH enforcement folder)")
+    folder_id: str = Query(default=None, description="ClickUp folder ID to scan (defaults to IH enforcement folder)"),
+    since_days: int = Query(default=None, description="Only backfill tasks updated within the last N days (e.g. 2). Omit to scan all tasks.")
 ):
     """
     Scan all tasks in the IH folder and post gate comments for any that were missed.
@@ -101,13 +102,13 @@ async def scan_tickets(
     No status reverts — backfill is comment-only.
     """
     target = folder_id or ENFORCEMENT_FOLDERS[0]
-    background_tasks.add_task(run_scan, target, dry_run)
-    return {"status": "scan started", "folder_id": target, "dry_run": dry_run}
+    background_tasks.add_task(run_scan, target, dry_run, since_days)
+    return {"status": "scan started", "folder_id": target, "dry_run": dry_run, "since_days": since_days}
 
 
-async def run_scan(folder_id: str, dry_run: bool):
+async def run_scan(folder_id: str, dry_run: bool, since_days: int = None):
     try:
-        results = await scan_and_backfill(folder_id, dry_run=dry_run)
+        results = await scan_and_backfill(folder_id, dry_run=dry_run, since_days=since_days)
         print(
             f"[SCAN] Complete — scanned={results['scanned']} "
             f"missed={results['missed']} posted={results['posted']} "
