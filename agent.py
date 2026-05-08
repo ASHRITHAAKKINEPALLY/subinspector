@@ -1152,15 +1152,15 @@ _AUTO_FIXABLE_CHECK_KEYWORDS = [
 def _can_auto_complete(score: int, content: str) -> tuple[bool, list[str]]:
     """
     Returns (can_auto_complete, failing_check_names).
-    Auto-complete triggers when score >= 4 AND every failing check is a soft
-    formality SI can write (closing note / acceptance confirmation / stakeholder
-    mention / docs N/A). Score floor of 4 prevents auto-closing tickets that
-    have real substantive gaps (missing evidence, open subtasks, etc.).
+    Auto-complete triggers ONLY at exactly 5/6 — one failing check that is a
+    soft formality SI can write (closing note / acceptance confirmation /
+    stakeholder mention / docs N/A). Requiring exactly 5/6 ensures SI never
+    auto-closes a ticket with two or more real gaps.
     """
     if score == 6:
         return False, []  # already passing
-    if score < 4:
-        return False, []  # too many gaps — require human to fix
+    if score < 5:
+        return False, []  # more than one gap — require human to fix
     failing = re.findall(r'\|\s*\d+\s*\|\s*([^|]+?)\s*\|\s*❌\s*FAIL', content)
     if not failing:
         return False, []
