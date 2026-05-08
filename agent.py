@@ -61,6 +61,11 @@ print(f"[AGENT] Startup check — ADVISORY_SPACES={ADVISORY_SPACES or '(not set 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 CLICKUP_BASE = "https://api.clickup.com/api/v2"
 
+# Global semaphore — ensures only ONE Groq LLM call runs at a time across all
+# concurrent scan tasks and webhook handlers. Prevents multiple simultaneous
+# scans from competing for the same 6000 TPM Groq rate limit.
+_GROQ_SEM = asyncio.Semaphore(1)
+
 PRE_EXEC_STATUSES = ["ready", "in progress", "in progess", "development", "code-review", "code review"]
 CLOSURE_STATUSES = ["qa", "uat", "prod review", "prod-review", "complete", "done", "ready to close"]
 
@@ -925,40 +930,41 @@ async def evaluate_gate(gate, task, tier_override=None):
     last_error = None
     primary, fallback = "llama-3.3-70b-versatile", "llama-3.1-8b-instant"
 
-    try:
-        content = await _call_groq(primary)
-        print(f"[AGENT] Groq OK — model={primary}", flush=True)
-        return content, raw_comments, comments_text_capped
-    except _RateLimitError as e:
-        print(f"[AGENT] {primary} rate limited (retry-after={e.retry_after}s) — switching to {fallback} immediately", flush=True)
-        last_error = e
-    except (httpx.TimeoutException, httpx.ConnectError) as e:
-        print(f"[AGENT] {primary} network error: {e} — switching to {fallback}", flush=True)
-        last_error = e
-    except Exception as e:
-        print(f"[AGENT] {primary} failed: {e} — switching to {fallback}", flush=True)
-        last_error = e
-
-    for attempt in range(4):
+    async with _GROQ_SEM:
         try:
-            content = await _call_groq(fallback)
-            print(f"[AGENT] Groq OK — model={fallback} attempt={attempt+1}", flush=True)
+            content = await _call_groq(primary)
+            print(f"[AGENT] Groq OK — model={primary}", flush=True)
             return content, raw_comments, comments_text_capped
         except _RateLimitError as e:
-            wait_sec = e.retry_after  # honour Groq's own Retry-After value
-            print(f"[AGENT] {fallback} rate limited (attempt {attempt+1}/4, retry-after={wait_sec}s) — waiting", flush=True)
+            print(f"[AGENT] {primary} rate limited (retry-after={e.retry_after}s) — switching to {fallback} immediately", flush=True)
             last_error = e
-            await asyncio.sleep(wait_sec)
         except (httpx.TimeoutException, httpx.ConnectError) as e:
-            print(f"[AGENT] {fallback} network error attempt {attempt+1}: {e}", flush=True)
+            print(f"[AGENT] {primary} network error: {e} — switching to {fallback}", flush=True)
             last_error = e
-            await asyncio.sleep(5)
         except Exception as e:
-            print(f"[AGENT] {fallback} failed attempt {attempt+1}: {e}", flush=True)
+            print(f"[AGENT] {primary} failed: {e} — switching to {fallback}", flush=True)
             last_error = e
-            await asyncio.sleep(5)
 
-    raise last_error or ValueError("Groq failed on all models")
+        for attempt in range(4):
+            try:
+                content = await _call_groq(fallback)
+                print(f"[AGENT] Groq OK — model={fallback} attempt={attempt+1}", flush=True)
+                return content, raw_comments, comments_text_capped
+            except _RateLimitError as e:
+                wait_sec = e.retry_after  # honour Groq's own Retry-After value
+                print(f"[AGENT] {fallback} rate limited (attempt {attempt+1}/4, retry-after={wait_sec}s) — waiting", flush=True)
+                last_error = e
+                await asyncio.sleep(wait_sec)
+            except (httpx.TimeoutException, httpx.ConnectError) as e:
+                print(f"[AGENT] {fallback} network error attempt {attempt+1}: {e}", flush=True)
+                last_error = e
+                await asyncio.sleep(5)
+            except Exception as e:
+                print(f"[AGENT] {fallback} failed attempt {attempt+1}: {e}", flush=True)
+                last_error = e
+                await asyncio.sleep(5)
+
+        raise last_error or ValueError("Groq failed on all models")
 
 
 async def post_comment(task_id, comment, reply_to_comment_id=None):
