@@ -121,8 +121,8 @@ SIMPLE DISCREPANCY BUGS (Bug Category = Logic Misalignment OR title has "discrep
 Minimum INTAKE requires only: (1) plain description of mismatch, (2) affected metric named, (3) one validation check.
 
 KEY PEOPLE — do NOT count as DE assignees: Komal Saraogi (PM/BA), Frido (management). Anudeep = valid only for BI tickets.
-BIGQUERY: Full path required: project.dataset.table. "in BQ" or no path = FAIL.
-BI TICKET: Treat as BI if title/description references Tableau, Power BI, dashboards, PBIX, workbooks.
+BIGQUERY: Path format is project.dataset.table. Proposed/target/wildcard paths are acceptable — do NOT fail because a path is labeled "proposed" or "target". FAIL only when NO path of any kind exists.
+BI TICKET: The user message explicitly states "Ticket Type: BI" or "Ticket Type: DE". ALWAYS follow that instruction. Do NOT override it based on your own reading of the description.
 Missing sections = FAIL. Placeholder text ("TBD", "N/A to fill later", "will update") = FAIL.
 
 MASTER TICKET: If ticket has subtasks OR title contains master/epic/initiative/tracker/rollout, append after gate checks:
