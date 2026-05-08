@@ -37,7 +37,6 @@ Most recent changes appear first within each section.
 - Yum Brands: `90164305799`
 - Momentous Projects: `90160230070`
 - BPN Consulting: `90020845754`
-- BPN DE: `90160770330`
 
 **3-level scope check (OR logic):** For each incoming webhook, the task's `folder.id`, `list.id`, and `space.id` are all checked. A task is in scope if any one of the three matches the enforcement or advisory sets. This ensures master/parent tickets (which may be in a different list than sprint tasks) are always caught.
 
