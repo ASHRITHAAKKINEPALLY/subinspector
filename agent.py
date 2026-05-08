@@ -1392,117 +1392,119 @@ async def process_webhook(payload):
 
     # ── Duplicate-webhook dedup ────────────────────────────────────────────────
     # ClickUp occasionally delivers the same webhook twice in quick succession.
-    # If a (task_id, gate) pair is already being evaluated in parallel, drop this
-    # one — it would race to post a second comment (often 0/6 due to rate limit
-    # on the second LLM call hitting right after the first one consumed the quota).
+    # The key is held for the ENTIRE processing window — from the first LLM call
+    # all the way through the final post_comment — so no duplicate webhook can
+    # slip through at any point, including during score counting and comment posting.
     _dedup_key = (task_id, gate)
     if _dedup_key in _IN_FLIGHT:
         print(f"[AGENT] Duplicate webhook dropped — {gate} gate for {task_id} already in flight", flush=True)
         return
     _IN_FLIGHT[_dedup_key] = True
     try:
-        content, raw_comments, comments_text_for_note = await evaluate_gate(gate, task, tier_override=tier_override)
-    except Exception as e:
-        err_type = type(e).__name__
-        err_msg = str(e)[:300]
-        print(f"[AGENT] evaluate_gate failed — {err_type}: {err_msg}", flush=True)
-        traceback.print_exc()
+        try:
+            content, raw_comments, comments_text_for_note = await evaluate_gate(gate, task, tier_override=tier_override)
+        except Exception as e:
+            err_type = type(e).__name__
+            err_msg = str(e)[:300]
+            print(f"[AGENT] evaluate_gate failed — {err_type}: {err_msg}", flush=True)
+            traceback.print_exc()
 
-        # Rate limit failures are transient — silently skip rather than posting a
-        # confusing error comment. The ticket will be re-evaluated on the next
-        # status change or when someone posts /si check.
-        is_rate_limit = "rate limit" in err_msg.lower() or "rate limited" in err_msg.lower()
-        if is_rate_limit:
-            print(f"[AGENT] Rate limit exhausted for {task_id} {gate} — skipping comment, use /si check to retry", flush=True)
+            # Rate limit failures are transient — silently skip rather than posting a
+            # confusing error comment. The ticket will be re-evaluated on the next
+            # status change or when someone posts /si check.
+            is_rate_limit = "rate limit" in err_msg.lower() or "rate limited" in err_msg.lower()
+            if is_rate_limit:
+                print(f"[AGENT] Rate limit exhausted for {task_id} {gate} — skipping comment, use /si check to retry", flush=True)
+                return
+
+            await post_comment(
+                task_id,
+                f"⚠️ SubInspector — {gate} gate check failed.\n`{err_type}: {err_msg}`",
+                reply_to_comment_id=trigger_comment_id
+            )
             return
 
-        await post_comment(
-            task_id,
-            f"⚠️ SubInspector — {gate} gate check failed.\n`{err_type}: {err_msg}`",
-            reply_to_comment_id=trigger_comment_id
-        )
-        return
+        # Guard: if the LLM returned empty or structurally invalid content, do not
+        # post a misleading 0/6 FAIL. Log and bail out silently.
+        if not content or not any(marker in content for marker in ("✅ PASS", "❌ FAIL", "SCORE:")):
+            print(f"[AGENT] LLM returned empty/invalid content for {gate} gate on {task_id} — skipping post", flush=True)
+            return
+
+        # Strip any trigger phrase the LLM may have hallucinated (loop prevention layer 3).
+        for _tp in _TRIGGER_PATTERNS:
+            content = _tp.sub("[re-check command]", content)
+
+        # BQ path override: if check #3 ❌ FAIL but a BQ path exists in the description,
+        # the LLM is wrong (new-build/ingestion ticket with target paths). Fix it in Python.
+        _desc_for_bq = _process_table_embeds(task.get("description", "") or "")
+        content = _fix_bq_check_false_fail(content, _desc_for_bq)
+
+        # Count actual ✅ PASS entries — more reliable than trusting the LLM's stated SCORE.
+        checks_match = re.search(r"CHECKS:\n(.*?)(?=\nSUMMARY:|\nMASTER TICKET:|$)", content, re.DOTALL)
+        if checks_match:
+            score = str(checks_match.group(1).count("✅ PASS"))
+        else:
+            score_match = re.search(r"SCORE:\s*(\d+)/6", content, re.IGNORECASE)
+            score = score_match.group(1) if score_match else "0"
+
+        passed = int(score.strip()) == 6
+
+        # ── AUTO-COMPLETE ──────────────────────────────────────────────────────────
+        # When CLOSURE gate scores 5/6 and the one failing check is a soft formality
+        # (closing note, stakeholder mention, docs N/A), SI writes the missing
+        # content, posts it, and moves the ticket to complete automatically.
+        # Disabled in advisory mode — never modify tasks outside ENFORCEMENT_FOLDERS.
+        if not advisory_mode and gate == "CLOSURE" and not passed and status.lower() not in ("complete", "done"):
+            can_fix, failing_checks = _can_auto_complete(int(score.strip()), content)
+            if can_fix:
+                print(f"[AGENT] Auto-complete triggered — soft gaps: {failing_checks}", flush=True)
+                closing_note = await generate_auto_closing_note(task, comments_text_for_note)
+                if closing_note:
+                    for _tp in _TRIGGER_PATTERNS:
+                        closing_note = _tp.sub("[re-check command]", closing_note)
+                    await post_comment(
+                        task_id,
+                        f"🤖 **SubInspector — Auto-Generated Closing Note**\n\n{closing_note}\n\n"
+                        f"_Auto-generated by SubInspector based on ticket context and comments._",
+                        reply_to_comment_id=trigger_comment_id
+                    )
+                    moved = await revert_status(task_id, "complete")
+                    status_line = "✅ Ticket moved to **complete**." if moved else "⚠️ Could not update status — please move manually."
+                    await post_comment(
+                        task_id,
+                        f"🤖 **SubInspector — Auto-Completed** | Score {score}/6\n\n"
+                        f"The only gap (`{'`, `'.join(failing_checks)}`) was a formality SI could fill.\n"
+                        f"Closing note posted above. {status_line}",
+                        reply_to_comment_id=trigger_comment_id
+                    )
+                    print(f"[AGENT] Auto-complete done for {task_id}", flush=True)
+                    return
+                print(f"[AGENT] Auto-complete: note generation failed — falling back to normal FAIL flow", flush=True)
+        # ── END AUTO-COMPLETE ──────────────────────────────────────────────────────
+
+        # Failure escalation and status revert are enforcement-only actions.
+        # In advisory mode (out-of-scope tasks) we skip both.
+        prior_failures = 0
+        if not passed and not advisory_mode:
+            prior_failures = await count_subinspector_failures(task_id, gate=gate, raw_comments=raw_comments)
+            if prior_failures >= 2:
+                print(f"[AGENT] Anti-loop triggered after {prior_failures + 1} failures — escalating to BA lead", flush=True)
+
+        can_revert = not passed and not is_dry_run and bool(previous_status) and not advisory_mode
+        reverted_to = None
+        if can_revert:
+            print(f"[AGENT] Reverting status to: {previous_status}", flush=True)
+            success = await revert_status(task_id, previous_status)
+            reverted_to = previous_status if success else None
+            if not success:
+                print(f"[AGENT] ⚠️ Revert failed — comment will NOT claim status was changed", flush=True)
+
+        comment = format_comment(gate, content, score, passed, prior_failures, reverted_to=reverted_to, advisory=advisory_mode)
+
+        await post_comment(task_id, comment, reply_to_comment_id=trigger_comment_id)
+
     finally:
         _IN_FLIGHT.pop(_dedup_key, None)
-
-    # Guard: if the LLM returned empty or structurally invalid content, do not
-    # post a misleading 0/6 FAIL. Log and bail out silently.
-    if not content or not any(marker in content for marker in ("✅ PASS", "❌ FAIL", "SCORE:")):
-        print(f"[AGENT] LLM returned empty/invalid content for {gate} gate on {task_id} — skipping post", flush=True)
-        return
-
-    # Strip any trigger phrase the LLM may have hallucinated (loop prevention layer 3).
-    for _tp in _TRIGGER_PATTERNS:
-        content = _tp.sub("[re-check command]", content)
-
-    # BQ path override: if check #3 ❌ FAIL but a BQ path exists in the description,
-    # the LLM is wrong (new-build/ingestion ticket with target paths). Fix it in Python.
-    _desc_for_bq = _process_table_embeds(task.get("description", "") or "")
-    content = _fix_bq_check_false_fail(content, _desc_for_bq)
-
-    # Count actual ✅ PASS entries — more reliable than trusting the LLM's stated SCORE.
-    checks_match = re.search(r"CHECKS:\n(.*?)(?=\nSUMMARY:|\nMASTER TICKET:|$)", content, re.DOTALL)
-    if checks_match:
-        score = str(checks_match.group(1).count("✅ PASS"))
-    else:
-        score_match = re.search(r"SCORE:\s*(\d+)/6", content, re.IGNORECASE)
-        score = score_match.group(1) if score_match else "0"
-
-    passed = int(score.strip()) == 6
-
-    # ── AUTO-COMPLETE ──────────────────────────────────────────────────────────
-    # When CLOSURE gate scores 5/6 and the one failing check is a soft formality
-    # (closing note, stakeholder mention, docs N/A), SI writes the missing
-    # content, posts it, and moves the ticket to complete automatically.
-    # Disabled in advisory mode — never modify tasks outside ENFORCEMENT_FOLDERS.
-    if not advisory_mode and gate == "CLOSURE" and not passed and status.lower() not in ("complete", "done"):
-        can_fix, failing_checks = _can_auto_complete(int(score.strip()), content)
-        if can_fix:
-            print(f"[AGENT] Auto-complete triggered — soft gaps: {failing_checks}", flush=True)
-            closing_note = await generate_auto_closing_note(task, comments_text_for_note)
-            if closing_note:
-                for _tp in _TRIGGER_PATTERNS:
-                    closing_note = _tp.sub("[re-check command]", closing_note)
-                await post_comment(
-                    task_id,
-                    f"🤖 **SubInspector — Auto-Generated Closing Note**\n\n{closing_note}\n\n"
-                    f"_Auto-generated by SubInspector based on ticket context and comments._",
-                    reply_to_comment_id=trigger_comment_id
-                )
-                moved = await revert_status(task_id, "complete")
-                status_line = "✅ Ticket moved to **complete**." if moved else "⚠️ Could not update status — please move manually."
-                await post_comment(
-                    task_id,
-                    f"🤖 **SubInspector — Auto-Completed** | Score {score}/6\n\n"
-                    f"The only gap (`{'`, `'.join(failing_checks)}`) was a formality SI could fill.\n"
-                    f"Closing note posted above. {status_line}",
-                    reply_to_comment_id=trigger_comment_id
-                )
-                print(f"[AGENT] Auto-complete done for {task_id}", flush=True)
-                return
-            print(f"[AGENT] Auto-complete: note generation failed — falling back to normal FAIL flow", flush=True)
-    # ── END AUTO-COMPLETE ──────────────────────────────────────────────────────
-
-    # Failure escalation and status revert are enforcement-only actions.
-    # In advisory mode (out-of-scope tasks) we skip both.
-    prior_failures = 0
-    if not passed and not advisory_mode:
-        prior_failures = await count_subinspector_failures(task_id, gate=gate, raw_comments=raw_comments)
-        if prior_failures >= 2:
-            print(f"[AGENT] Anti-loop triggered after {prior_failures + 1} failures — escalating to BA lead", flush=True)
-
-    can_revert = not passed and not is_dry_run and bool(previous_status) and not advisory_mode
-    reverted_to = None
-    if can_revert:
-        print(f"[AGENT] Reverting status to: {previous_status}", flush=True)
-        success = await revert_status(task_id, previous_status)
-        reverted_to = previous_status if success else None
-        if not success:
-            print(f"[AGENT] ⚠️ Revert failed — comment will NOT claim status was changed", flush=True)
-
-    comment = format_comment(gate, content, score, passed, prior_failures, reverted_to=reverted_to, advisory=advisory_mode)
-
-    await post_comment(task_id, comment, reply_to_comment_id=trigger_comment_id)
 
 
 # ── Backfill / missed-ticket scan ─────────────────────────────────────────────
