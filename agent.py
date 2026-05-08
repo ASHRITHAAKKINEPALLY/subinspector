@@ -2,6 +2,7 @@ import os
 import re
 import io
 import json
+import datetime
 import base64
 import asyncio
 import traceback
@@ -822,14 +823,23 @@ async def evaluate_gate(gate, task, tier_override=None):
         )
     else:
         comments_text_capped = comments_text
-    attachment_info_capped = attachment_info[:1500]
-    subtask_info_capped    = subtask_info[:800]
+    # Truncate at a newline boundary so we never cut mid-line
+    def _cap(text, limit):
+        if len(text) <= limit:
+            return text
+        cut = text.rfind("\n", 0, limit)
+        return text[:cut if cut > 0 else limit] + "\n...[truncated]"
+
+    attachment_info_capped = _cap(attachment_info, 1500)
+    subtask_info_capped    = _cap(subtask_info, 800)
 
     is_master = subtask_count > 0
 
     # Detect BI tickets in Python so the LLM doesn't have to guess
     task_name = task.get("name", "")
-    bi_keywords = ["tableau", "power bi", "powerbi", "pbix", "dashboard", "workbook", "report"]
+    # "report" and "workbook" removed — too broad, match common DE ticket language
+    # and cause false BI classification on non-BI tickets.
+    bi_keywords = ["tableau", "power bi", "powerbi", "pbix", "dashboard"]
     is_bi = (
         task_name.lower().startswith("[bi]")
         or any(kw in task_name.lower() for kw in bi_keywords)
@@ -1169,7 +1179,6 @@ async def generate_auto_closing_note(task: dict, comments_text: str) -> str:
     Use Groq to draft a closing note from ticket context.
     Uses the small/fast 8b model — output is short (~300 tokens).
     """
-    import datetime
     today       = datetime.date.today().strftime("%b %d, %Y")
     task_name   = task.get("name", "")
     assignees   = ", ".join(a.get("username", "") for a in task.get("assignees", [])) or "team"
