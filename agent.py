@@ -1,6 +1,7 @@
 import os
 import re
 import io
+import json
 import base64
 import asyncio
 import traceback
@@ -295,13 +296,17 @@ def _fix_bq_check_false_fail(content: str, description: str) -> str:
             f"(found '{bq_match.group(0)[:60]}' in description)",
             flush=True
         )
-        # Also update the stale SUMMARY line so it doesn't contradict the PASS
-        new_content = re.sub(
-            r'(SUMMARY:.*)',
-            'SUMMARY: All gate checks passed — BQ path confirmed (target/proposed path accepted for new-build/ingestion ticket).',
-            new_content,
-            count=1
-        )
+        # Only replace the SUMMARY if ALL 6 checks now pass.
+        # If other checks still fail, the LLM's original summary is still accurate
+        # for those failures — overwriting it with "all passed" would be wrong.
+        total_passes = new_content.count("✅ PASS")
+        if total_passes >= 6:
+            new_content = re.sub(
+                r'(SUMMARY:.*)',
+                'SUMMARY: All gate checks passed — BQ path confirmed (target/proposed path accepted for new-build/ingestion ticket).',
+                new_content,
+                count=1
+            )
     return new_content
 
 
@@ -473,9 +478,9 @@ def determine_gate(event, status, history_items):
     # IMPORTANT: check CLOSURE first — "ready to close" contains "ready" (a PRE-EXEC
     # substring) so checking PRE-EXEC first would mis-route it to the wrong gate.
     if event == "taskStatusUpdated":
-        if any(s in status for s in CLOSURE_STATUSES):
+        if status in CLOSURE_STATUSES:
             return "CLOSURE", False, None, None
-        elif any(s in status for s in PRE_EXEC_STATUSES):
+        elif status in PRE_EXEC_STATUSES:
             return "PRE-EXECUTION", False, None, None
 
     # Manual si check comment → report only, never revert (is_dry_run=True)
@@ -507,14 +512,14 @@ def determine_gate(event, status, history_items):
         if _is_trigger(comment_text):
             # IMPORTANT: check CLOSURE first — "ready to close" contains "ready"
             # (a PRE-EXEC substring), so checking PRE-EXEC first would mis-route it.
-            if any(s in status for s in CLOSURE_STATUSES):
+            if status in CLOSURE_STATUSES:
                 # If the ticket is already at a terminal "done" state, just report —
                 # never revert a ticket that's already been marked complete/done.
                 # Enforcement (revert on fail) only applies to non-final closure
                 # statuses like prod-review, uat, qa.
                 already_done = status in ("complete", "done")
                 return "CLOSURE", already_done, trigger_comment_id, tier_override
-            elif any(s in status for s in PRE_EXEC_STATUSES):
+            elif status in PRE_EXEC_STATUSES:
                 return "PRE-EXECUTION", True, trigger_comment_id, tier_override
             else:
                 return "INTAKE", True, trigger_comment_id, tier_override
@@ -1289,7 +1294,6 @@ async def process_webhook(payload):
     print(f"[AGENT] Webhook: event={event} task_id={task_id} history_items_count={len(history_items)}", flush=True)
     if history_items:
         # Log structure so we can debug comment text extraction misses
-        import json
         sample = history_items[0]
         print(f"[AGENT] history_items[0] keys={list(sample.keys())}", flush=True)
         comment_preview = sample.get("comment") or (sample.get("data") or {}).get("comment") or {}
@@ -1642,9 +1646,9 @@ async def scan_and_backfill(folder_id: str = None, dry_run: bool = False) -> dic
         results["scanned"] += 1
 
         # Determine the expected gate for the current status
-        if any(s in status for s in CLOSURE_STATUSES):
+        if status in CLOSURE_STATUSES:
             expected_gate = "CLOSURE"
-        elif any(s in status for s in PRE_EXEC_STATUSES):
+        elif status in PRE_EXEC_STATUSES:
             expected_gate = "PRE-EXECUTION"
         else:
             expected_gate = "INTAKE"
@@ -1672,6 +1676,12 @@ async def scan_and_backfill(folder_id: str = None, dry_run: bool = False) -> dic
             # BQ path override (backfill path)
             _desc_bq = _process_table_embeds(full_task.get("description", "") or "")
             content = _fix_bq_check_false_fail(content, _desc_bq)
+
+            # Guard: empty/invalid LLM response — skip rather than post 0/6
+            if not content or not any(m in content for m in ("✅ PASS", "❌ FAIL", "SCORE:")):
+                print(f"[SCAN] LLM returned empty/invalid content for {task_id} — skipping", flush=True)
+                results["errors"] += 1
+                continue
 
             checks_match = re.search(r"CHECKS:\n(.*?)(?=\nSUMMARY:|\nMASTER TICKET:|$)", content, re.DOTALL)
             if checks_match:
