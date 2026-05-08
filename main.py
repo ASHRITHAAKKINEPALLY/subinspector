@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Request, BackgroundTasks, Query
 from contextlib import asynccontextmanager
-from agent import process_webhook, scan_and_backfill, CLICKUP_API_KEY, ENFORCEMENT_FOLDERS
+from agent import process_webhook, scan_and_backfill, CLICKUP_API_KEY, ENFORCEMENT_FOLDERS, _build_advisory_space_map
 import traceback
 import asyncio
 import os
@@ -71,6 +71,7 @@ async def keep_alive():
 async def lifespan(app):
     asyncio.create_task(ensure_webhook())
     asyncio.create_task(keep_alive())
+    asyncio.create_task(_build_advisory_space_map())
     yield
 
 app = FastAPI(lifespan=lifespan)
