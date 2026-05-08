@@ -901,7 +901,9 @@ async def evaluate_gate(gate, task, tier_override=None):
     print(f"[AGENT] Sending to Groq — prompt size: {len(user_message)} chars", flush=True)
 
     class _RateLimitError(Exception):
-        pass
+        def __init__(self, msg, retry_after: int = 60):
+            super().__init__(msg)
+            self.retry_after = retry_after  # seconds to wait before retrying
 
     async def _call_groq(model: str) -> str:
         async with httpx.AsyncClient(timeout=60) as client:
@@ -919,7 +921,10 @@ async def evaluate_gate(gate, task, tier_override=None):
                 }
             )
             if response.status_code == 429:
-                raise _RateLimitError(f"rate limited on {model}")
+                # Read Retry-After header so we wait exactly as long as Groq says.
+                # Groq sends this as an integer number of seconds; default 60 if absent.
+                retry_after = int(response.headers.get("retry-after", 60))
+                raise _RateLimitError(f"rate limited on {model}", retry_after=retry_after)
             try:
                 data = response.json()
             except Exception:
@@ -931,7 +936,9 @@ async def evaluate_gate(gate, task, tier_override=None):
     # Strategy:
     # 1. Try llama-3.3-70b-versatile once — best quality, but strict rate limit (6k TPM free).
     # 2. On rate limit → immediately fall back to llama-3.1-8b-instant (20k TPM, no wait).
-    # 3. Retry 8b-instant up to 3× with short waits if needed.
+    # 3. Retry 8b-instant up to 4× honouring the Retry-After header from each 429.
+    # If all attempts fail with rate limits, raise _RateLimitError so the caller
+    # can silently skip rather than posting a confusing error comment.
     last_error = None
     primary, fallback = "llama-3.3-70b-versatile", "llama-3.1-8b-instant"
 
@@ -940,7 +947,7 @@ async def evaluate_gate(gate, task, tier_override=None):
         print(f"[AGENT] Groq OK — model={primary}", flush=True)
         return content, raw_comments, comments_text_capped
     except _RateLimitError as e:
-        print(f"[AGENT] {primary} rate limited — switching to {fallback} immediately", flush=True)
+        print(f"[AGENT] {primary} rate limited (retry-after={e.retry_after}s) — switching to {fallback} immediately", flush=True)
         last_error = e
     except (httpx.TimeoutException, httpx.ConnectError) as e:
         print(f"[AGENT] {primary} network error: {e} — switching to {fallback}", flush=True)
@@ -949,14 +956,14 @@ async def evaluate_gate(gate, task, tier_override=None):
         print(f"[AGENT] {primary} failed: {e} — switching to {fallback}", flush=True)
         last_error = e
 
-    for attempt in range(3):
+    for attempt in range(4):
         try:
             content = await _call_groq(fallback)
             print(f"[AGENT] Groq OK — model={fallback} attempt={attempt+1}", flush=True)
             return content, raw_comments, comments_text_capped
         except _RateLimitError as e:
-            wait_sec = 20 * (attempt + 1)
-            print(f"[AGENT] {fallback} rate limited (attempt {attempt+1}/3) — waiting {wait_sec}s", flush=True)
+            wait_sec = e.retry_after  # honour Groq's own Retry-After value
+            print(f"[AGENT] {fallback} rate limited (attempt {attempt+1}/4, retry-after={wait_sec}s) — waiting", flush=True)
             last_error = e
             await asyncio.sleep(wait_sec)
         except (httpx.TimeoutException, httpx.ConnectError) as e:
@@ -1444,6 +1451,15 @@ async def process_webhook(payload):
         err_msg = str(e)[:300]
         print(f"[AGENT] evaluate_gate failed — {err_type}: {err_msg}", flush=True)
         traceback.print_exc()
+
+        # Rate limit failures are transient — silently skip rather than posting a
+        # confusing error comment. The ticket will be re-evaluated on the next
+        # status change or when someone posts /si check.
+        is_rate_limit = "rate limit" in err_msg.lower() or "rate limited" in err_msg.lower()
+        if is_rate_limit:
+            print(f"[AGENT] Rate limit exhausted for {task_id} {gate} — skipping comment, use /si check to retry", flush=True)
+            return
+
         await post_comment(
             task_id,
             f"⚠️ SubInspector — {gate} gate check failed.\n`{err_type}: {err_msg}`",
