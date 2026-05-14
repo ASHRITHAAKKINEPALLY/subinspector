@@ -1324,38 +1324,43 @@ async def process_webhook(payload):
     #    typing /si check is < 20 chars. This makes loops structurally impossible:
     #    even if the LLM somehow outputs the trigger phrase, the comment length will
     #    be >> 100 chars and will be skipped.
-    if history_items:
-        actor_id = str((history_items[0].get("user") or {}).get("id", ""))
-        if actor_id == BOT_USER_ID:
-            if event == "taskStatusUpdated":
-                print(f"[AGENT] Skipping — taskStatusUpdated from bot account", flush=True)
+    #
+    # Actor is found in history_items[0]["user"]["id"] when present, but ClickUp
+    # sometimes sends empty history_items for API-triggered changes. Fall back to
+    # the top-level creator_id / user fields so the filter never silently misses.
+    _actor_id_from_history = str((history_items[0].get("user") or {}).get("id", "")) if history_items else ""
+    _actor_id_from_root    = str(payload.get("creator_id") or (payload.get("user") or {}).get("id") or "")
+    actor_id_resolved      = _actor_id_from_history or _actor_id_from_root
+    if actor_id_resolved == BOT_USER_ID:
+        if event == "taskStatusUpdated":
+            print(f"[AGENT] Skipping — taskStatusUpdated from bot account", flush=True)
+            return
+        if event == "taskCommentPosted":
+            item = history_items[0] if history_items else {}
+            comment_obj = (
+                item.get("comment")
+                or (item.get("data") or {}).get("comment")
+                or {}
+            )
+            raw_text = (extract_comment_text(comment_obj) or extract_comment_text(item) or "").strip()
+
+            # If text extraction from webhook payload failed, try fetching via API
+            if not raw_text:
+                comment_id = (comment_obj.get("id") if isinstance(comment_obj, dict) else None) or item.get("id") or ""
+                if comment_id:
+                    print(f"[AGENT] Text extraction from payload failed — fetching comment {comment_id} from API", flush=True)
+                    raw_text = await fetch_comment_text_from_api(comment_id)
+
+            print(f"[AGENT] Bot-account comment text: {repr(raw_text[:120])}", flush=True)
+
+            # Only skip if we have text AND it's NOT a short trigger.
+            # If text is empty (extraction failed entirely), let it through —
+            # determine_gate will check for trigger and gate=None → skip safely.
+            if raw_text and not (_is_trigger(raw_text) and len(raw_text) <= 100):
+                print(f"[AGENT] Skipping — bot account comment (len={len(raw_text)})", flush=True)
                 return
-            if event == "taskCommentPosted":
-                item = history_items[0]
-                comment_obj = (
-                    item.get("comment")
-                    or (item.get("data") or {}).get("comment")
-                    or {}
-                )
-                raw_text = (extract_comment_text(comment_obj) or extract_comment_text(item) or "").strip()
-
-                # If text extraction from webhook payload failed, try fetching via API
-                if not raw_text:
-                    comment_id = (comment_obj.get("id") if isinstance(comment_obj, dict) else None) or item.get("id") or ""
-                    if comment_id:
-                        print(f"[AGENT] Text extraction from payload failed — fetching comment {comment_id} from API", flush=True)
-                        raw_text = await fetch_comment_text_from_api(comment_id)
-
-                print(f"[AGENT] Bot-account comment text: {repr(raw_text[:120])}", flush=True)
-
-                # Only skip if we have text AND it's NOT a short trigger.
-                # If text is empty (extraction failed entirely), let it through —
-                # determine_gate will check for trigger and gate=None → skip safely.
-                if raw_text and not (_is_trigger(raw_text) and len(raw_text) <= 100):
-                    print(f"[AGENT] Skipping — bot account comment (len={len(raw_text)})", flush=True)
-                    return
-                elif not raw_text:
-                    print(f"[AGENT] Bot account comment — could not extract text, letting through to determine_gate", flush=True)
+            elif not raw_text:
+                print(f"[AGENT] Bot account comment — could not extract text, letting through to determine_gate", flush=True)
 
     try:
         task = await fetch_task(task_id)
