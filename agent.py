@@ -124,7 +124,7 @@ If comment/description contains "Tier: T1/T2/T3", use that tier.
 SIMPLE DISCREPANCY BUGS (Bug Category = Logic Misalignment OR title has "discrepancy/mismatch/incorrect"):
 Minimum INTAKE requires only: (1) plain description of mismatch, (2) affected metric named, (3) one validation check.
 
-KEY PEOPLE — do NOT count as DE assignees: Komal Saraogi (PM/BA), Frido (management). Anudeep = valid only for BI tickets.
+KEY PEOPLE — do NOT count as DE assignees: Komal Saraogi (PM/BA), Frido (management). Any other assigned person counts as a valid DE/BI developer.
 BIGQUERY: Path format is project.dataset.table. Proposed/target/wildcard paths are acceptable — do NOT fail because a path is labeled "proposed" or "target". FAIL only when NO path of any kind exists.
 BI TICKET: The user message explicitly states "Ticket Type: BI" or "Ticket Type: DE". ALWAYS follow that instruction. Do NOT override it based on your own reading of the description.
 Missing sections = FAIL. Placeholder text ("TBD", "N/A to fill later", "will update") = FAIL.
@@ -172,7 +172,7 @@ INTAKE GATE — BI Tickets (use ONLY when user message says "Ticket Type: BI"):
     "PRE-EXECUTION": """
 PRE-EXECUTION GATE — Generic (6 checks):
 1. BA Inputs Complete — all 6 present: problem statement, expected output, scope/edge cases+timeline, validation checks, success criteria, data source+business context. FAIL if any missing or TBD.
-2. Valid DE Assignee — at least one DE person assigned (not Komal/Frido; Anudeep only for BI). FAIL if only PM/BA assigned.
+2. Valid DE Assignee — at least one non-PM/BA person assigned (anyone except Komal Saraogi or Frido counts). FAIL if only PM/BA assigned or no one assigned.
 3. BigQuery path present — scan the description for any project.dataset.table string. PASS if found (proposed/target/wildcard paths are fine). FAIL only if no BQ path exists anywhere in the description.
 4. Feasibility Assessment — technical review comment exists for T2/T3. PASS for T1 if self-evident. FAIL if absent for complex work.
 5. Dependencies Identified and Unblocked — all dependencies recorded with owners and unblocked.
@@ -180,7 +180,7 @@ PRE-EXECUTION GATE — Generic (6 checks):
 
 PRE-EXECUTION GATE — BI Tickets (use ONLY when user message says "Ticket Type: BI"):
 1. All 6 BI Intake inputs complete — none TBD.
-2. Valid BI developer assigned (Anudeep counts; PM/BA do not).
+2. Valid BI developer assigned — any assignee who is not PM/BA (Komal Saraogi, Frido) counts. FAIL only if unassigned or only PM/BA assigned.
 3. Granularity and filters defined (date range, drill-downs, slicers, row-level security).
 4. Refresh cadence confirmed (live/daily/weekly/manual).
 5. Upstream DE dependencies unblocked (source tables ready in BQ).
