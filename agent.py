@@ -67,7 +67,7 @@ CLICKUP_BASE = "https://api.clickup.com/api/v2"
 _GROQ_SEM = asyncio.Semaphore(1)
 
 PRE_EXEC_STATUSES = ["ready", "in progress", "in progess", "development", "code-review", "code review"]
-CLOSURE_STATUSES = ["qa", "uat", "prod review", "prod-review", "complete", "done", "ready to close"]
+CLOSURE_STATUSES = ["qa", "uat", "prod review", "prod-review", "complete", "done", "ready to close", "can happen again"]
 
 # When the webhook payload is missing previous_status, use these maps to
 # determine where to revert. CLOSURE reverts to prod-review; PRE-EXECUTION
@@ -1668,6 +1668,13 @@ async def scan_and_backfill(folder_id: str = None, dry_run: bool = False, since_
 
             passed        = int(score.strip()) == 6
             prior_failures = await count_subinspector_failures(task_id, gate=expected_gate, raw_comments=raw_comments)
+
+            # Double-check just before posting — guards against two concurrent scans
+            # both passing the has_gate_comment check before either has posted.
+            if await has_gate_comment(task_id, expected_gate):
+                print(f"[SCAN] Double-check: {task_id} now has {expected_gate} comment — skipping to avoid duplicate", flush=True)
+                results["already_covered"] += 1
+                continue
 
             # Backfill comments never revert status — ticket may have moved on since
             comment = format_comment(expected_gate, content, score, passed, prior_failures, reverted_to=None)
