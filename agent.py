@@ -1054,7 +1054,7 @@ async def revert_status(task_id, status) -> bool:
             return False
 
 
-def format_comment(gate, content, score, passed, prior_failures=0, reverted_to=None, advisory=False):
+def format_comment(gate, content, score, passed, prior_failures=0, reverted_to=None, advisory=False, assignees=None):
     """Parse LLM output and return a ClickUp rich-text comment block array.
 
     advisory=True: compact report for out-of-scope tasks — no status revert,
@@ -1122,16 +1122,26 @@ def format_comment(gate, content, score, passed, prior_failures=0, reverted_to=N
                 {"text": "  -  Once updated, trigger a SubInspector re-check to re-evaluate\n"},
             ]
         elif prior_failures == 1:
+            _assignee_mentions = " ".join(
+                f"@{a.get('username', a.get('email', ''))}"
+                for a in (assignees or [])
+                if a.get("username") or a.get("email")
+            ) or "@assignee"
             blocks += [
-                {"text": "⚠️ 2nd Failure — BA Lead Consult Required\n", "attributes": {"bold": True}},
+                {"text": "⚠️ 2nd Failure — Action Required\n", "attributes": {"bold": True}},
                 {"text": "  -  This ticket has failed SubInspector gate checks twice\n"},
-                {"text": "  -  Please discuss with @Komal Saraogi before making further changes\n"},
-                {"text": "  -  Fix all ❌ checks above, then trigger a re-check to retry\n"},
+                {"text": f"  -  {_assignee_mentions} — please fix all ❌ checks above\n"},
+                {"text": "  -  Trigger a re-check once updated to retry\n"},
             ]
         else:
+            _assignee_mentions = " ".join(
+                f"@{a.get('username', a.get('email', ''))}"
+                for a in (assignees or [])
+                if a.get("username") or a.get("email")
+            ) or "@assignee"
             blocks += [
                 {"text": f"🚨 Repeated Failure ({prior_failures + 1} total) — Enforcement Suspended\n", "attributes": {"bold": True}},
-                {"text": "  -  @Komal Saraogi — manual review required before this ticket can proceed\n"},
+                {"text": f"  -  {_assignee_mentions} — manual review required before this ticket can proceed\n"},
                 {"text": "  -  Automatic gate enforcement is paused; the team must resolve this manually\n"},
             ]
 
@@ -1544,7 +1554,7 @@ async def process_webhook(payload):
         if not passed and not advisory_mode:
             prior_failures = await count_subinspector_failures(task_id, gate=gate, raw_comments=raw_comments)
             if prior_failures >= 2:
-                print(f"[AGENT] Anti-loop triggered after {prior_failures + 1} failures — escalating to BA lead", flush=True)
+                print(f"[AGENT] Anti-loop triggered after {prior_failures + 1} failures — tagging assignees", flush=True)
 
         can_revert = not passed and not is_dry_run and bool(previous_status) and not advisory_mode
         reverted_to = None
@@ -1555,7 +1565,7 @@ async def process_webhook(payload):
             if not success:
                 print(f"[AGENT] ⚠️ Revert failed — comment will NOT claim status was changed", flush=True)
 
-        comment = format_comment(gate, content, score, passed, prior_failures, reverted_to=reverted_to, advisory=advisory_mode)
+        comment = format_comment(gate, content, score, passed, prior_failures, reverted_to=reverted_to, advisory=advisory_mode, assignees=task.get("assignees", []))
 
         await post_comment(task_id, comment, reply_to_comment_id=trigger_comment_id)
 
@@ -1721,7 +1731,7 @@ async def scan_and_backfill(folder_id: str = None, dry_run: bool = False, since_
                 continue
 
             # Backfill comments never revert status — ticket may have moved on since
-            comment = format_comment(expected_gate, content, score, passed, prior_failures, reverted_to=None)
+            comment = format_comment(expected_gate, content, score, passed, prior_failures, reverted_to=None, assignees=full_task.get("assignees", []))
             await post_comment(task_id, comment)
             results["posted"] += 1
             print(f"[SCAN] Posted {expected_gate} gate on {task_id} — score={score}/6 passed={passed}", flush=True)
