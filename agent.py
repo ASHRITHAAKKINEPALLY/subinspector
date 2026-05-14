@@ -278,6 +278,41 @@ def _fix_bq_check_false_fail(content: str, description: str) -> str:
     return new_content
 
 
+_BUG_TITLE_KEYWORDS = re.compile(
+    r'\b(bug|fix|mismatch|discrepancy|gap|logic|validation|incorrect|wrong|rca|error|issue|null|broken)\b',
+    re.IGNORECASE
+)
+
+def _fix_closure_doc_check_for_bugs(content: str, task_name: str, gate: str) -> str:
+    """Post-process CLOSURE LLM output: if check #6 (Documentation Updated) is
+    ❌ FAIL but the ticket title contains bug/fix/mismatch/etc., auto-override to
+    ✅ PASS — documentation N/A is implied by scope for bug/fix tickets.
+
+    Mirrors the rule in the system prompt that the LLM applies inconsistently.
+    Only fires for CLOSURE gate.
+    """
+    if gate != "CLOSURE":
+        return content
+    if '❌ FAIL' not in content:
+        return content
+    if not _BUG_TITLE_KEYWORDS.search(task_name or ""):
+        return content
+
+    new_content = re.sub(
+        r'(\| 6 \|[^|]*\|)\s*❌ FAIL\s*(\|[^|]*\|)',
+        r'\1 ✅ PASS | Documentation N/A — bug/fix/mismatch ticket (auto-pass by title keyword). |',
+        content,
+        count=1
+    )
+    if new_content != content:
+        print(
+            f"[AGENT] Bug-doc auto-override: CLOSURE check #6 → PASS "
+            f"(title matched bug/fix/mismatch keyword: '{task_name[:60]}')",
+            flush=True
+        )
+    return new_content
+
+
 # Threshold: table-embeds with more than this many rows are summarised
 # (they're reference tables — column lists, lookup tables, etc. — not evidence).
 # Small tables (≤ threshold) are formatted as readable text so the LLM can
@@ -1449,6 +1484,9 @@ async def process_webhook(payload):
         # the LLM is wrong (new-build/ingestion ticket with target paths). Fix it in Python.
         _desc_for_bq = _process_table_embeds(task.get("description", "") or "")
         content = _fix_bq_check_false_fail(content, _desc_for_bq)
+        # Bug/fix doc override: if CLOSURE check #6 ❌ FAIL but title contains bug/fix/mismatch etc.,
+        # auto-pass — documentation N/A is implied by scope for bug/fix tickets.
+        content = _fix_closure_doc_check_for_bugs(content, task.get("name", ""), gate)
 
         # Count ✅ PASS only when it appears as a standalone result-column cell
         # (surrounded by pipes). Simple .count("✅ PASS") would also catch any
@@ -1652,6 +1690,7 @@ async def scan_and_backfill(folder_id: str = None, dry_run: bool = False, since_
             # BQ path override (backfill path)
             _desc_bq = _process_table_embeds(full_task.get("description", "") or "")
             content = _fix_bq_check_false_fail(content, _desc_bq)
+            content = _fix_closure_doc_check_for_bugs(content, full_task.get("name", ""), expected_gate)
 
             # Guard: empty/invalid LLM response — skip rather than post 0/6
             if not content or not any(m in content for m in ("✅ PASS", "❌ FAIL", "SCORE:")):
