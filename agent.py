@@ -6,6 +6,7 @@ import datetime
 import base64
 import asyncio
 import traceback
+from collections import OrderedDict
 import httpx
 import pdfplumber
 import openpyxl
@@ -106,6 +107,29 @@ BOT_USER_ID = os.environ.get("BOT_USER_ID", "100965864")
 # simultaneously when ClickUp delivers duplicate webhooks in parallel.
 # Key: (task_id, gate)  Value: asyncio.Event (set when evaluation completes)
 _IN_FLIGHT: dict = {}
+
+# Sticky opt-in: task_ids that have been hit with /si check on an out-of-scope
+# folder. Subsequent events on these tasks get advisory-mode processing too,
+# so the user doesn't have to re-post /si check on every status change.
+# In-memory only — clears on restart; users can re-trigger with /si check.
+_MANUAL_OPTIN: "OrderedDict[str, None]" = OrderedDict()
+_MANUAL_OPTIN_MAX = 500
+
+def _remember_optin(task_id: str) -> None:
+    if not task_id:
+        return
+    if task_id in _MANUAL_OPTIN:
+        _MANUAL_OPTIN.move_to_end(task_id)
+    else:
+        _MANUAL_OPTIN[task_id] = None
+        while len(_MANUAL_OPTIN) > _MANUAL_OPTIN_MAX:
+            _MANUAL_OPTIN.popitem(last=False)
+
+def _is_opted_in(task_id: str) -> bool:
+    if task_id in _MANUAL_OPTIN:
+        _MANUAL_OPTIN.move_to_end(task_id)
+        return True
+    return False
 
 def _is_trigger(text: str) -> bool:
     return any(p.search(text) for p in _TRIGGER_PATTERNS)
@@ -1400,6 +1424,32 @@ async def process_webhook(payload):
     )
 
     print(f"[AGENT] Folder: {folder_id} | List: {list_id} | Space: {space_id} | Enforcement: {in_scope} | Advisory: {in_advisory}", flush=True)
+
+    # Manual /si check override: a user-posted trigger comment forces an advisory
+    # check even on tickets outside the configured folders. The bot replies with
+    # the gate report but never touches status/fields on out-of-scope tickets.
+    # Once opted in, the task_id is remembered so future events on that ticket
+    # get advisory processing too — user doesn't need to re-post /si check.
+    if not in_scope and not in_advisory:
+        if event == "taskCommentPosted":
+            item = history_items[0] if history_items else {}
+            comment_obj = (
+                item.get("comment")
+                or (item.get("data") or {}).get("comment")
+                or {}
+            )
+            override_text = (extract_comment_text(comment_obj) or extract_comment_text(item) or "").strip()
+            if not override_text:
+                comment_id = (comment_obj.get("id") if isinstance(comment_obj, dict) else None) or item.get("id") or ""
+                if comment_id:
+                    override_text = await fetch_comment_text_from_api(comment_id)
+            if _is_trigger(override_text):
+                _remember_optin(task_id)
+                print(f"[AGENT] Out-of-scope task — manual /si check override, forcing advisory mode (cached task_id={task_id})", flush=True)
+                in_advisory = True
+        if not in_advisory and _is_opted_in(task_id):
+            print(f"[AGENT] Out-of-scope task — previously opted-in via /si check, forcing advisory mode", flush=True)
+            in_advisory = True
 
     if not in_scope and not in_advisory:
         # None of folder / list / space matched — skip entirely.
