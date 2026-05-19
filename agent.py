@@ -1428,12 +1428,15 @@ async def process_webhook(payload):
         return
 
     if not in_scope:
-        # Advisory folder: comment only, no status changes, no escalation.
-        # taskStatusUpdated → gate check for new status (no revert)
-        # taskCreated       → INTAKE check
-        # taskCommentPosted → gate check on /si check trigger only (checked after determine_gate)
-        if event not in ("taskCommentPosted", "taskCreated", "taskStatusUpdated"):
-            print(f"[AGENT] Skipping — advisory folder, unhandled event={event}", flush=True)
+        # Advisory folder: only respond to a manual /si check trigger comment.
+        # taskCreated and taskStatusUpdated are silent — no auto INTAKE on creation,
+        # no auto gate check on status change. Same one-shot rule as out-of-scope
+        # tickets: the user must explicitly post /si check each time they want a
+        # gate evaluation. The /si check detection itself happens in determine_gate
+        # below; if no trigger is found, advisory_mode + gate=None bails out at the
+        # "no /si check trigger found" guard.
+        if event != "taskCommentPosted":
+            print(f"[AGENT] Skipping — advisory folder, only /si check comments trigger (event={event})", flush=True)
             return
         print(f"[AGENT] Advisory mode (event={event})", flush=True)
 
