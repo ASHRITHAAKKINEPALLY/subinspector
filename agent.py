@@ -41,6 +41,7 @@ _DEFAULT_ADVISORY_FOLDERS = ",".join([
     "90164305799",  # Yum Brands
     "90160230070",  # Momentous Projects
     "90020845754",  # BPN - BarePerformanceNutrition (Consulting)
+    "90169116337",  # Innosups
 ])
 ADVISORY_FOLDERS = os.environ.get("ADVISORY_FOLDERS", _DEFAULT_ADVISORY_FOLDERS).split(",")
 ADVISORY_SPACES  = [x.strip() for x in os.environ.get("ADVISORY_SPACES", "").split(",") if x.strip()]
