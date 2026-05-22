@@ -46,6 +46,12 @@ _DEFAULT_ADVISORY_FOLDERS = ",".join([
 ADVISORY_FOLDERS = os.environ.get("ADVISORY_FOLDERS", _DEFAULT_ADVISORY_FOLDERS).split(",")
 ADVISORY_SPACES  = [x.strip() for x in os.environ.get("ADVISORY_SPACES", "").split(",") if x.strip()]
 
+# Delay before SI evaluates a freshly-created advisory ticket. People often
+# type the title first and fill the description over the next few minutes;
+# running INTAKE immediately would post a misleading FAIL on a half-empty ticket.
+# Manual /si check is NOT delayed — it goes through taskCommentPosted, not taskCreated.
+ADVISORY_INTAKE_DELAY_SECONDS = int(os.environ.get("ADVISORY_INTAKE_DELAY_SECONDS", "900"))
+
 # NOTE: Space-level auto-detection was removed.
 # Reason: advisory client folders and unrelated internal folders (e.g. Mashburn)
 # can share the same ClickUp space. Auto-detecting by space_id caused SI to comment
@@ -58,6 +64,7 @@ print(f"[AGENT] Startup check — ENFORCEMENT_FOLDERS={ENFORCEMENT_FOLDERS}", fl
 print(f"[AGENT] Startup check — ENFORCEMENT_SPACES={ENFORCEMENT_SPACES or '(not set — add via HF secret to catch master tickets)'}", flush=True)
 print(f"[AGENT] Startup check — ADVISORY_FOLDERS={ADVISORY_FOLDERS}", flush=True)
 print(f"[AGENT] Startup check — ADVISORY_SPACES={ADVISORY_SPACES or '(not set — add via HF secret to catch master tickets)'}", flush=True)
+print(f"[AGENT] Startup check — ADVISORY_INTAKE_DELAY_SECONDS={ADVISORY_INTAKE_DELAY_SECONDS}s", flush=True)
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 CLICKUP_BASE = "https://api.clickup.com/api/v2"
@@ -106,6 +113,11 @@ BOT_USER_ID = os.environ.get("BOT_USER_ID", "100965864")
 # simultaneously when ClickUp delivers duplicate webhooks in parallel.
 # Key: (task_id, gate)  Value: asyncio.Event (set when evaluation completes)
 _IN_FLIGHT: dict = {}
+
+# Tracks advisory tasks currently waiting through ADVISORY_INTAKE_DELAY_SECONDS.
+# Duplicate taskCreated webhooks during the wait are dropped so we don't queue
+# multiple delayed evaluations for the same ticket.
+_PENDING_INTAKE_DELAY: dict = {}
 
 def _is_trigger(text: str) -> bool:
     return any(p.search(text) for p in _TRIGGER_PATTERNS)
@@ -1457,6 +1469,32 @@ async def process_webhook(payload):
     if advisory_mode:
         is_dry_run = True
         print(f"[AGENT] Advisory mode — enforcement disabled, reporting only", flush=True)
+
+    # Advisory intake delay: freshly-created advisory tickets often start with
+    # just a title — the description gets filled in over the next few minutes.
+    # Wait ADVISORY_INTAKE_DELAY_SECONDS before evaluating so we don't post a
+    # misleading FAIL on a half-empty ticket. Manual /si check is unaffected
+    # because it arrives as taskCommentPosted, not taskCreated.
+    if advisory_mode and event == "taskCreated" and ADVISORY_INTAKE_DELAY_SECONDS > 0:
+        if task_id in _PENDING_INTAKE_DELAY:
+            print(f"[AGENT] Skipping — advisory intake delay already pending for {task_id}", flush=True)
+            return
+        _PENDING_INTAKE_DELAY[task_id] = True
+        try:
+            print(f"[AGENT] Advisory intake — waiting {ADVISORY_INTAKE_DELAY_SECONDS}s before evaluation (gives user time to fill ticket)", flush=True)
+            await asyncio.sleep(ADVISORY_INTAKE_DELAY_SECONDS)
+            if await has_gate_comment(task_id, "INTAKE"):
+                print(f"[AGENT] Advisory intake delay complete — INTAKE already posted (likely manual /si check during wait), skipping", flush=True)
+                return
+            try:
+                task = await fetch_task(task_id)
+            except Exception as e:
+                print(f"[AGENT] Re-fetch after advisory intake delay failed for {task_id}: {e}", flush=True)
+                return
+            status = (task.get("status") or {}).get("status", "")
+            print(f"[AGENT] Advisory intake delay complete — re-fetched task, status now '{status}'", flush=True)
+        finally:
+            _PENDING_INTAKE_DELAY.pop(task_id, None)
 
     # For CLOSURE gate with no previous_status (e.g. manual /si check), use the
     # revert map so enforcement still works even without a webhook history entry.
