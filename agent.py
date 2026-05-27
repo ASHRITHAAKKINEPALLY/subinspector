@@ -184,12 +184,19 @@ INTAKE GATE — BI Tickets (use ONLY when user message says "Ticket Type: BI"):
 
     "PRE-EXECUTION": """
 PRE-EXECUTION GATE — Generic (6 checks):
-1. BA Inputs Complete — all 6 present: problem statement, expected output, scope/edge cases+timeline, validation checks, success criteria, data source+business context. FAIL if any missing or TBD.
+IMPORTANT CLOSURE-ARTIFACT RULE (applies to checks 5 AND 6): Closure-only deliverables are NOT pre-execution concerns. The following are CLOSURE artifacts and their absence MUST NOT fail PRE-EXEC:
+  - Validation sheet / validation results / before-after comparison / spot-check tables / row-count reconciliation
+  - Stakeholder sign-off / QA approval / closure notes / "Moving to Done" comment
+  - Final published dashboard link / regression check confirmation
+  - Documentation update / data dictionary entry
+Phrases like "validation sheet must be attached before closing" or "evidence will be provided at closure" describe FUTURE work scoped to the CLOSURE gate. They are NOT scope ambiguity and NOT a dependency block. PASS checks 5 and 6 when the only "gap" is a closure artifact that hasn't been produced yet — that is by design and exactly what CLOSURE will verify.
+
+1. BA Inputs Complete — all 6 present: problem statement, expected output, scope/edge cases+timeline, validation checks, success criteria, data source+business context. FAIL if any missing or TBD. Note: "validation checks" here means the validation PLAN (what will be checked), not the validation RESULTS. A plan describing the validation sheet that will be produced PASSES this check.
 2. Valid DE Assignee — at least one non-PM/BA person assigned (anyone except Komal Saraogi or Frido counts). FAIL if only PM/BA assigned or no one assigned.
 3. BigQuery path present — scan the description for any project.dataset.table string. PASS if found (proposed/target/wildcard paths are fine). FAIL only if no BQ path exists anywhere in the description.
 4. Feasibility Assessment — technical review comment exists for T2/T3. PASS for T1 if self-evident. FAIL if absent for complex work.
-5. Dependencies Identified and Unblocked — all dependencies recorded with owners and unblocked.
-6. Scope Locked — no TBD/placeholder language in any execution-critical aspect.
+5. Dependencies Identified and Unblocked — all upstream/parallel dependencies on OTHER tickets, OTHER teams, or OTHER tables are recorded with owners and unblocked. PASS automatically if the description does not list any cross-ticket / cross-team dependencies — "no dependencies" is a valid state. Do NOT confuse closure-artifact requirements (validation sheet, evidence) with dependencies — those are CLOSURE checks, not blockers here.
+6. Scope Locked — no TBD/placeholder/"to be decided"/"figure out" language in any execution-critical aspect. PASS when the work to be done in DEVELOPMENT is fully specified. Mentions of artifacts that will be produced LATER (validation sheets, sign-offs, before/after comparisons, closure evidence) do NOT count as scope ambiguity — those are closure deliverables and verified at the CLOSURE gate.
 
 PRE-EXECUTION GATE — BI Tickets (use ONLY when user message says "Ticket Type: BI"):
 1. All 6 BI Intake inputs complete — none TBD.
@@ -295,6 +302,101 @@ _BUG_TITLE_KEYWORDS = re.compile(
     r'\b(bug|fix|mismatch|discrepancy|gap|logic|validation|incorrect|wrong|rca|error|issue|null|broken)\b',
     re.IGNORECASE
 )
+
+_CLOSURE_ARTIFACT_PATTERNS = re.compile(
+    r'\b('
+    r'validation\s+sheet|validation\s+results|'
+    r'before[-\s]?after|spot[-\s]?check|row\s+count|reconciliation|'
+    r'closure\s+artifact|closure\s+evidence|closure\s+notes|'
+    r'sign[-\s]?off|sign\s+off|qa\s+approval|stakeholder\s+approval|'
+    r'attached\s+to\s+(?:the\s+)?ticket\s+before\s+clos|'
+    r'before\s+clos(?:ing|ure)|'
+    r'final\s+(?:published\s+)?dashboard|regression\s+check'
+    r')\b',
+    re.IGNORECASE
+)
+
+# Detail phrasings that imply "I couldn't find any dependencies in the
+# description" — these are LLM hallucinations of a dependency block when in
+# fact the ticket genuinely has no cross-ticket/team dependencies. A real
+# dependency FAIL would name the blocker (e.g. "Blocked on Snowflake migration"),
+# so these phrasings are safe to flip.
+_NO_DEPENDENCIES_PATTERNS = re.compile(
+    r'('
+    r'no\s+evidence\s+(?:that\s+|of\s+)?dependenc(?:y|ies)|'
+    r'no\s+clear\s+indication\s+(?:that\s+)?dependenc(?:y|ies)|'
+    r'no\s+dependenc(?:y|ies)\s+(?:are\s+|have\s+been\s+|were\s+)?(?:mentioned|listed|recorded|identified)|'
+    r'dependenc(?:y|ies)\s+(?:are\s+not|have\s+not\s+been|were\s+not)\s+(?:mentioned|listed|recorded|identified)|'
+    r'no\s+cross[-\s](?:ticket|team)\s+dependenc(?:y|ies)'
+    r')',
+    re.IGNORECASE
+)
+
+
+def _fix_preexec_closure_artifact_false_fail(content: str, gate: str) -> str:
+    """Post-process PRE-EXECUTION output: flip checks 5/6 from ❌ FAIL → ✅ PASS
+    when the LLM's failure reason is a known hallucination.
+
+    Two patterns covered:
+      • Closure-artifact mention (validation sheet, before/after, sign-off, etc.)
+        — the LLM treats "must be attached before closing" as PRE-EXEC scope
+        ambiguity, but those are CLOSURE concerns.
+      • No-dependencies hallucination on check 5 — the LLM says "no evidence
+        of dependencies recorded" when the ticket genuinely has zero
+        dependencies. "Nothing to record" is a valid state, not a FAIL.
+
+    A real dependency block ("Blocked on X owned by Bob") names the blocker
+    and won't match _NO_DEPENDENCIES_PATTERNS, so it stays as FAIL.
+    """
+    if gate != "PRE-EXECUTION":
+        return content
+    if '❌ FAIL' not in content:
+        return content
+
+    flipped_any = False
+
+    def _maybe_flip(m, check_num):
+        nonlocal flipped_any
+        prefix = m.group(1)
+        detail = m.group(2) if m.lastindex and m.lastindex >= 2 else ""
+        detail = detail or ""
+        match_closure = _CLOSURE_ARTIFACT_PATTERNS.search(detail)
+        match_no_deps = (check_num == 5) and _NO_DEPENDENCIES_PATTERNS.search(detail)
+        if not (match_closure or match_no_deps):
+            return m.group(0)
+        flipped_any = True
+        reason = "closure-only artifact" if match_closure else "no-dependencies hallucination"
+        print(
+            f"[AGENT] PRE-EXEC override: check #{check_num} → PASS "
+            f"(LLM {reason})",
+            flush=True
+        )
+        replacement_detail = (
+            "Closure-artifact mention is not a PRE-EXEC gap — verified at CLOSURE gate."
+            if match_closure
+            else "No dependencies = valid state (nothing to record); not a PRE-EXEC block."
+        )
+        return f"{prefix} ✅ PASS | {replacement_detail} |"
+
+    pattern_5 = re.compile(r'(\| 5 \|[^|]*\|)\s*❌ FAIL\s*\|([^|]*)\|')
+    pattern_6 = re.compile(r'(\| 6 \|[^|]*\|)\s*❌ FAIL\s*\|([^|]*)\|')
+
+    new_content = pattern_5.sub(lambda m: _maybe_flip(m, 5), content, count=1)
+    new_content = pattern_6.sub(lambda m: _maybe_flip(m, 6), new_content, count=1)
+
+    if flipped_any:
+        # If all 6 checks now PASS, rewrite SUMMARY so it doesn't still claim a gap.
+        _cb = re.search(r"CHECKS:\n(.*?)(?=\nSUMMARY:|\nMASTER TICKET:|$)", new_content, re.DOTALL)
+        total_passes = len(re.findall(r'\|\s*✅\s*PASS\s*\|', _cb.group(1))) if _cb else 0
+        if total_passes >= 6:
+            new_content = re.sub(
+                r'(SUMMARY:.*)',
+                'SUMMARY: All PRE-EXEC checks pass — closure-artifact mentions (validation sheet, sign-off, before/after) are verified at the CLOSURE gate, not here.',
+                new_content,
+                count=1
+            )
+    return new_content
+
 
 def _fix_closure_doc_check_for_bugs(content: str, task_name: str, gate: str) -> str:
     """Post-process CLOSURE LLM output: if check #6 (Documentation Updated) is
@@ -1562,6 +1664,9 @@ async def process_webhook(payload):
         # Bug/fix doc override: if CLOSURE check #6 ❌ FAIL but title contains bug/fix/mismatch etc.,
         # auto-pass — documentation N/A is implied by scope for bug/fix tickets.
         content = _fix_closure_doc_check_for_bugs(content, task.get("name", ""), gate)
+        # PRE-EXEC closure-artifact override: validation sheet / sign-off / before-after mentions
+        # are CLOSURE concerns, not PRE-EXEC scope or dependency gaps.
+        content = _fix_preexec_closure_artifact_false_fail(content, gate)
 
         # Count ✅ PASS only when it appears as a standalone result-column cell
         # (surrounded by pipes). Simple .count("✅ PASS") would also catch any
@@ -1766,6 +1871,7 @@ async def scan_and_backfill(folder_id: str = None, dry_run: bool = False, since_
             _desc_bq = _process_table_embeds(full_task.get("description", "") or "")
             content = _fix_bq_check_false_fail(content, _desc_bq)
             content = _fix_closure_doc_check_for_bugs(content, full_task.get("name", ""), expected_gate)
+            content = _fix_preexec_closure_artifact_false_fail(content, expected_gate)
 
             # Guard: empty/invalid LLM response — skip rather than post 0/6
             if not content or not any(m in content for m in ("✅ PASS", "❌ FAIL", "SCORE:")):
