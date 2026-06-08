@@ -1001,11 +1001,22 @@ async def evaluate_gate(gate, task, tier_override=None):
     # "report" and "workbook" removed — too broad, match common DE ticket language
     # and cause false BI classification on non-BI tickets.
     bi_keywords = ["tableau", "power bi", "powerbi", "pbix", "dashboard"]
-    is_bi = (
-        task_name.lower().startswith("[bi]")
-        or any(kw in task_name.lower() for kw in bi_keywords)
-        or any(kw in (task.get("description") or "").lower()[:1000] for kw in bi_keywords)
-    )
+    # Explicit [DE] or [BI] tag in the title is authoritative — keyword scan
+    # often false-positives on DE tickets whose description mentions "dashboard"
+    # in the consumer sense (e.g. "presentation layer for dashboard consumption").
+    # [BI] wins if both tags are present.
+    title_lower = task_name.lower()
+    has_bi_tag = "[bi]" in title_lower
+    has_de_tag = "[de]" in title_lower
+    if has_bi_tag:
+        is_bi = True
+    elif has_de_tag:
+        is_bi = False
+    else:
+        is_bi = (
+            any(kw in title_lower for kw in bi_keywords)
+            or any(kw in (task.get("description") or "").lower()[:1000] for kw in bi_keywords)
+        )
     bi_line = "Ticket Type: BI — use the BI-specific checklist, NOT the generic checklist.\n" if is_bi else "Ticket Type: DE (non-BI) — use the generic checklist.\n"
     print(f"[AGENT] BI detected: {is_bi}", flush=True)
 
