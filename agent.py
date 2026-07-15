@@ -45,6 +45,7 @@ _DEFAULT_ADVISORY_FOLDERS = ",".join([
     "90168199241",  # Warmies (Consulting Team space — verified via workspace hierarchy)
     "90169975290",  # DBrand (Consulting Team space — verified via ClickUp API)
     "90169973546",  # Primal Harvest (Consulting Team space — verified via ClickUp API)
+    "901610066735", # City Beauty (Consulting Team space — verified via ClickUp API)
 ])
 ADVISORY_FOLDERS = os.environ.get("ADVISORY_FOLDERS", _DEFAULT_ADVISORY_FOLDERS).split(",")
 ADVISORY_SPACES  = [x.strip() for x in os.environ.get("ADVISORY_SPACES", "").split(",") if x.strip()]
