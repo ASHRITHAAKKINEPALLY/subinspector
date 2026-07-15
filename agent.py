@@ -230,7 +230,7 @@ CLOSURE GATE — BI Tickets (use ONLY when user message says "Ticket Type: BI"):
 2. Published dashboard link or final screenshot attached.
 3. Stakeholder/client sign-off confirmed in a comment.
 4. All subtasks closed or marked N/A.
-5. Source tables/views documented in ticket or linked doc.
+5. Source tables/views documented in ticket or linked doc — PASS if the ticket description, notes, or any comment contains a BigQuery path (project.dataset.table) or otherwise names the source table(s). A full BQ path present IN the ticket description ALONE satisfies "documented in ticket"; NO external documentation link is required. Only FAIL if there is no reference to any source table anywhere.
 6. Publish and access handoff confirmed (right workspace, right users have access)."""
 }
 
@@ -251,13 +251,22 @@ _BQ_PATH_RE = re.compile(
 
 
 def _fix_bq_check_false_fail(content: str, description: str) -> str:
-    """Post-process LLM output: if check #3 is ❌ FAIL but a BQ path
-    (project.dataset.table) is demonstrably present in the ticket description,
+    """Post-process LLM output: if check #3 is ❌ FAIL AND its check name is
+    actually about BigQuery path AND a BQ path exists in the description,
     override it to ✅ PASS.
 
-    This handles the LLM's persistent tendency to fail check #3 on
-    new-build/ingestion tickets even when full target BQ paths are present
-    (e.g. Northbeam ingestion ticket with pulse-instanthydration.dataset.table).
+    Handles the LLM's persistent tendency to fail check #3 on new-build /
+    ingestion tickets with target paths (e.g. pulse-instanthydration.ds.table).
+
+    IMPORTANT: check #3 differs per gate. It is a BigQuery check ONLY for:
+      - Generic PRE-EXEC     ("BigQuery path present")
+      - BI INTAKE            ("BigQuery path present")
+    On other gates check #3 is something else and MUST NOT be flipped:
+      - Generic INTAKE       ("Definition of Done")
+      - BI PRE-EXEC          ("Granularity and filters defined")
+      - Generic CLOSURE      ("QA Sign-Off")
+      - BI CLOSURE           ("Stakeholder/client sign-off confirmed")
+    Guard: only flip when the check name column contains "BigQuery" or "BQ path".
     """
     # Only act when a FAIL exists and a BQ path is actually in the description
     if '❌ FAIL' not in content:
@@ -266,11 +275,13 @@ def _fix_bq_check_false_fail(content: str, description: str) -> str:
     if not bq_match:
         return content  # no BQ path at all — FAIL is legitimate
 
-    # Flip check #3 row from ❌ FAIL → ✅ PASS
+    # Flip check #3 row from ❌ FAIL → ✅ PASS, but ONLY when the check name
+    # is actually the BQ-path check (see docstring for gate-specific mapping).
     def _flip(m):
-        name_col   = m.group(1)   # "| 3 | <check name> |"
-        detail_col = m.group(2)   # "| <old detail> |"
-        bq_found   = bq_match.group(0)[:70]
+        name_col = m.group(1)   # "| 3 | <check name> |"
+        if not re.search(r'bigquery|bq\s*path', name_col, re.IGNORECASE):
+            return m.group(0)   # different check on this gate — leave alone
+        bq_found = bq_match.group(0)[:70]
         return (
             f"{name_col} ✅ PASS "
             f"| BQ path confirmed in description (new-build target path acceptable): {bq_found} |"
@@ -306,6 +317,52 @@ _BUG_TITLE_KEYWORDS = re.compile(
     r'\b(bug|fix|mismatch|discrepancy|gap|logic|validation|incorrect|wrong|rca|error|issue|null|broken)\b',
     re.IGNORECASE
 )
+
+
+def _fix_bi_closure_source_check_false_fail(content: str, description: str, gate: str) -> str:
+    """Post-process BI CLOSURE output: flip check #5 (Source tables/views
+    documented) from ❌ FAIL → ✅ PASS when a BQ path is present in the ticket
+    description.
+
+    The check text says "documented in ticket OR linked doc". The LLM often
+    reads this as "must have an external doc link" and FAILs even when the
+    ticket description contains the full BQ path. A full project.dataset.table
+    string in the description IS documentation.
+
+    Fires ONLY when check #5's name matches the BI CLOSURE "Source tables/views"
+    phrasing — Generic CLOSURE check #5 is "Stakeholder Notified" and must not
+    be touched by this override.
+    """
+    if gate != "CLOSURE":
+        return content
+    if '❌ FAIL' not in content:
+        return content
+    bq_match = _BQ_PATH_RE.search(description or "")
+    if not bq_match:
+        return content
+
+    def _flip(m):
+        name_col = m.group(1)
+        # Only flip if this row is the BI CLOSURE source-tables check
+        if not re.search(r'source\s+tables?\s*/\s*views?\s+documented|source\s+tables?\s+documented|source\s+tables?/views?', name_col, re.IGNORECASE):
+            return m.group(0)
+        bq_found = bq_match.group(0)[:70]
+        print(
+            f"[AGENT] BI CLOSURE source-docs override: check #5 → PASS "
+            f"(BQ path in description: {bq_found[:50]})",
+            flush=True
+        )
+        return (
+            f"{name_col} ✅ PASS "
+            f"| BQ path in ticket description satisfies 'documented in ticket': {bq_found} |"
+        )
+
+    return re.sub(
+        r'(\| 5 \|[^|]*\|)\s*❌ FAIL\s*\|[^|]*\|',
+        _flip,
+        content,
+        count=1
+    )
 
 _CLOSURE_ARTIFACT_PATTERNS = re.compile(
     r'\b('
@@ -1679,6 +1736,8 @@ async def process_webhook(payload):
         # Bug/fix doc override: if CLOSURE check #6 ❌ FAIL but title contains bug/fix/mismatch etc.,
         # auto-pass — documentation N/A is implied by scope for bug/fix tickets.
         content = _fix_closure_doc_check_for_bugs(content, task.get("name", ""), gate)
+        # BI CLOSURE source-docs override: BQ path in ticket description counts as documentation.
+        content = _fix_bi_closure_source_check_false_fail(content, _desc_for_bq, gate)
         # PRE-EXEC closure-artifact override: validation sheet / sign-off / before-after mentions
         # are CLOSURE concerns, not PRE-EXEC scope or dependency gaps.
         content = _fix_preexec_closure_artifact_false_fail(content, gate)
@@ -1886,6 +1945,7 @@ async def scan_and_backfill(folder_id: str = None, dry_run: bool = False, since_
             _desc_bq = _process_table_embeds(full_task.get("description", "") or "")
             content = _fix_bq_check_false_fail(content, _desc_bq)
             content = _fix_closure_doc_check_for_bugs(content, full_task.get("name", ""), expected_gate)
+            content = _fix_bi_closure_source_check_false_fail(content, _desc_bq, expected_gate)
             content = _fix_preexec_closure_artifact_false_fail(content, expected_gate)
 
             # Guard: empty/invalid LLM response — skip rather than post 0/6
