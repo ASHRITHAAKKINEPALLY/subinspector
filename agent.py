@@ -1683,10 +1683,13 @@ async def process_webhook(payload):
             after_data = (history_items[0].get("data") or {}).get("after") if history_items else {}
             status_lower = ((after_data.get("status") or {}).get("status") or "").lower() if isinstance(after_data, dict) else ""
             revert_statuses = ("open", "prod-review", "prod review")
-            if status_lower in revert_statuses:
+            if not status_lower:
+                print(f"[AGENT] Skipping — taskStatusUpdated from bot account but could not extract status from payload", flush=True)
+                return
+            elif status_lower in revert_statuses:
                 print(f"[AGENT] Skipping — taskStatusUpdated from bot account to revert status '{status_lower}'", flush=True)
                 return
-            elif status_lower:
+            else:
                 print(f"[AGENT] Bot account changed status to '{status_lower}' (not a revert target) — processing", flush=True)
         if event == "taskCommentPosted":
             item = history_items[0] if history_items else {}
