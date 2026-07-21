@@ -1679,12 +1679,14 @@ async def process_webhook(payload):
             # Only skip if the status was changed to one of SI's revert targets.
             # User manual status changes should NOT be skipped even if actor_id matches.
             # Revert statuses: "open" (PRE-EXEC revert) or prod-review (CLOSURE revert).
-            status_lower = (task.get("status") or {}).get("status", "").lower()
+            # Extract status from webhook payload before fetching task.
+            after_data = (history_items[0].get("data") or {}).get("after") if history_items else {}
+            status_lower = ((after_data.get("status") or {}).get("status") or "").lower() if isinstance(after_data, dict) else ""
             revert_statuses = ("open", "prod-review", "prod review")
             if status_lower in revert_statuses:
                 print(f"[AGENT] Skipping — taskStatusUpdated from bot account to revert status '{status_lower}'", flush=True)
                 return
-            else:
+            elif status_lower:
                 print(f"[AGENT] Bot account changed status to '{status_lower}' (not a revert target) — processing", flush=True)
         if event == "taskCommentPosted":
             item = history_items[0] if history_items else {}
