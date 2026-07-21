@@ -76,7 +76,15 @@ CLICKUP_BASE = "https://api.clickup.com/api/v2"
 # Global semaphore — ensures only ONE Groq LLM call runs at a time across all
 # concurrent scan tasks and webhook handlers. Prevents multiple simultaneous
 # scans from competing for the same 6000 TPM Groq rate limit.
-_GROQ_SEM = asyncio.Semaphore(1)
+# Lazy-initialized to avoid cross-event-loop binding issues under uvicorn --reload.
+_GROQ_SEM = None
+
+async def _get_groq_sem():
+    """Lazy-initialize the semaphore on first use in the correct event loop."""
+    global _GROQ_SEM
+    if _GROQ_SEM is None:
+        _GROQ_SEM = asyncio.Semaphore(1)
+    return _GROQ_SEM
 
 PRE_EXEC_STATUSES = ["ready", "in progress", "in progess", "development", "code-review", "code review"]
 CLOSURE_STATUSES = ["qa", "uat", "prod review", "prod-review", "complete", "done", "ready to close", "can happen again"]
@@ -178,13 +186,22 @@ INTAKE GATE — Generic (6 checks):
 5. Mandatory Fields — Problem Statement, Expected Output, Definition of Done, Data Source all present and non-empty with substantive content. PASS if the BA sections contain clear intent and value even if not formatted as a strict user-story template — do not fail for phrasing style when substance is present.
 6. DE Actionability — expected output clear, BQ path present if DE work is in scope, no TBDs. Actionable without a meeting. PASS AUTOMATICALLY when the ticket involves no data engineering work (no BQ query, no pipeline, no table build, no ingestion, no transformation, no SQL). When DE work IS in scope: scan the entire description for any string matching project.dataset.table (e.g. pulse-instanthydration.dataset.tablename or project.dataset.table_*). PASS if at least one such path is found. Do NOT fail because paths are labeled "proposed"/"target" or have wildcard suffixes — new-build tickets provide target paths before the table exists, and that is acceptable. FAIL only when DE work is explicitly in scope AND no BQ path of any kind appears anywhere in the description.
 
-INTAKE GATE — BI Tickets (use ONLY when user message says "Ticket Type: BI"):
+INTAKE GATE — BI Tickets (use ONLY when user message says "Ticket Type: BI" AND "BI Sub-track: NEW BUILD"):
 1. Problem Statement names dashboard, target persona, and business value.
 2. BI Tool explicitly specified (Power BI / Tableau + workspace/embed target).
 3. BigQuery path present — scan the entire description for any string matching the pattern project.dataset.table (dots between three non-space segments, e.g. pulse-instanthydration.instanthydration_4927_prod_raw.Northbeam_Ads_data_*). PASS if at least one such path is found anywhere. FAIL only if no BQ path of any kind exists in the description. Do NOT fail because paths are labeled "proposed" or "target" or have wildcard suffixes — those are acceptable.
 4. KPIs/Metrics defined with calculation logic or spec/BRD reference.
 5. Definition of Done — what the finished dashboard shows and how sign-off is given.
-6. Screenshot/Mockup/Wireframe — PASS if mockup, wireframe, sample layout description, or screenshot of an existing similar report is attached or described. FAIL only if there is absolutely no visual reference or output format description of any kind.""",
+6. Screenshot/Mockup/Wireframe — PASS if mockup, wireframe, sample layout description, or screenshot of an existing similar report is attached or described. FAIL only if there is absolutely no visual reference or output format description of any kind.
+
+INTAKE GATE — BI Enhancement Tickets (use ONLY when user message says "Ticket Type: BI" AND "BI Sub-track: ENHANCEMENT"):
+SCORING: rows 1-3 are REQUIRED (must all PASS for the ticket to PASS). Rows 4-6 are OPTIONAL — they earn bonus points but a FAIL on an OPTIONAL check does NOT block the ticket. Mark each row's Check column with "(REQUIRED)" or "(OPTIONAL)" exactly as below so the post-processor can identify them.
+1. Existing dashboard identified (REQUIRED) — live link, embed URL, or unambiguous reference to the existing dashboard is provided so the developer can see the current state before touching it. FAIL if no link/reference at all.
+2. Change request is specific (REQUIRED) — each requested change names the exact metric, chart, filter, or page being modified. FAIL on vague language ("fix the dashboard", "make it better", "improve this") with no specifics.
+3. Current vs. desired state (REQUIRED) — for each change, the ticket describes what the dashboard shows today AND what it should show after, with calculation logic for any new or revised metrics. FAIL if either side (current OR desired) is missing.
+4. Root cause or business reason stated (OPTIONAL) — why the change is needed (data accuracy, new business logic, stakeholder feedback, source schema change). PASS if any motivation is given.
+5. Screenshot or annotated mockup of the problem area (OPTIONAL) — visual evidence of the issue or the desired change. PASS if any image/attachment relevant to the change exists.
+6. Impact scope assessed (OPTIONAL) — ticket flags whether the change cascades to filters, other pages, downstream reports, or scheduled deliveries. PASS if any impact discussion exists, even brief.""",
 
     "PRE-EXECUTION": """
 PRE-EXECUTION GATE — Generic (6 checks):
@@ -202,13 +219,21 @@ Phrases like "validation sheet must be attached before closing" or "evidence wil
 5. Dependencies Identified and Unblocked — all upstream/parallel dependencies on OTHER tickets, OTHER teams, or OTHER tables are recorded with owners and unblocked. PASS automatically if the description does not list any cross-ticket / cross-team dependencies — "no dependencies" is a valid state. Do NOT confuse closure-artifact requirements (validation sheet, evidence) with dependencies — those are CLOSURE checks, not blockers here.
 6. Scope Locked — no TBD/placeholder/"to be decided"/"figure out" language in any execution-critical aspect. PASS when the work to be done in DEVELOPMENT is fully specified. Mentions of artifacts that will be produced LATER (validation sheets, sign-offs, before/after comparisons, closure evidence) do NOT count as scope ambiguity — those are closure deliverables and verified at the CLOSURE gate.
 
-PRE-EXECUTION GATE — BI Tickets (use ONLY when user message says "Ticket Type: BI"):
+PRE-EXECUTION GATE — BI Tickets (use ONLY when user message says "Ticket Type: BI" AND "BI Sub-track: NEW BUILD"):
 1. All 6 BI Intake inputs complete — none TBD.
 2. Valid BI developer assigned — any assignee who is not PM/BA (Komal Saraogi, Frido) counts. FAIL only if unassigned or only PM/BA assigned.
 3. Granularity and filters defined (date range, drill-downs, slicers, row-level security).
 4. Refresh cadence confirmed (live/daily/weekly/manual).
 5. Upstream DE dependencies unblocked (source tables ready in BQ).
-6. Scope locked — zero TBD in any metric, layout, or filter definition.""",
+6. Scope locked — zero TBD in any metric, layout, or filter definition.
+
+PRE-EXECUTION GATE — BI Enhancement Tickets (use ONLY when user message says "Ticket Type: BI" AND "BI Sub-track: ENHANCEMENT") — all 6 required:
+1. All required Intake inputs complete — the 3 required INTAKE checks (existing dashboard identified, change specific, current vs. desired state) are all present and non-TBD.
+2. Valid BI developer assigned with access — any non-PM/BA person assigned. Komal Saraogi / Frido do NOT count. FAIL if unassigned or only PM/BA.
+3. Regression scope defined — ticket explicitly calls out which existing metrics, charts, or views must remain unchanged so the developer knows what NOT to break. FAIL if no regression scope statement at all.
+4. Source data confirmed — if the enhancement involves a new column / table / join, the upstream data path is verified as available and populated (BQ path or upstream confirmation). PASS automatically if the enhancement is purely cosmetic / layout / filter changes with no new data dependency.
+5. Version or backup plan noted — developer knows whether to duplicate the dashboard before editing OR confirms tool version history is sufficient. A one-line statement either way is enough.
+6. Scope locked — zero TBD / "to be decided" / "nice-to-have" ambiguity. Any nice-to-have items are split into a separate ticket rather than left in this one.""",
 
     "CLOSURE": """
 CLOSURE GATE — Generic (6 checks):
@@ -225,13 +250,21 @@ IMPORTANT STAKEHOLDER RULE: If the ticket assignee, team lead (Ashritha Akkinepa
 5. Stakeholder Notified — PASS if any team member (assignee, team lead, or anyone) has posted a comment confirming the work is done, even without an explicit @mention. A "Moving ticket to Done 🎉" or equivalent statement counts. FAIL only if there is literally no completion acknowledgment from any team member.
 6. Documentation Updated — updated, linked, or explicitly marked N/A. For bug fixes / logic updates / config changes, or any ticket whose title contains mismatch/discrepancy/gap/fix/bug/logic/validation/incorrect/wrong — PASS automatically (documentation N/A implied by scope). Only FAIL if the ticket is clearly a new feature or dashboard build with no documentation at all.
 
-CLOSURE GATE — BI Tickets (use ONLY when user message says "Ticket Type: BI"):
+CLOSURE GATE — BI Tickets (use ONLY when user message says "Ticket Type: BI" AND "BI Sub-track: NEW BUILD"):
 1. All KPIs validated with before/after numbers or screenshots.
 2. Published dashboard link or final screenshot attached.
 3. Stakeholder/client sign-off confirmed in a comment.
 4. All subtasks closed or marked N/A.
 5. Source tables/views documented in ticket or linked doc — PASS if the ticket description, notes, or any comment contains a BigQuery path (project.dataset.table) or otherwise names the source table(s). A full BQ path present IN the ticket description ALONE satisfies "documented in ticket"; NO external documentation link is required. Only FAIL if there is no reference to any source table anywhere.
-6. Publish and access handoff confirmed (right workspace, right users have access)."""
+6. Publish and access handoff confirmed (right workspace, right users have access).
+
+CLOSURE GATE — BI Enhancement Tickets (use ONLY when user message says "Ticket Type: BI" AND "BI Sub-track: ENHANCEMENT") — all 6 required:
+1. Before/after comparison documented — screenshots or data samples showing the old state AND the new state for every changed element. FAIL if only one side (only after, no before) is shown.
+2. Regression check passed — a comment, screenshot, or validation statement confirms unchanged metrics/views are unaffected. PASS if the developer or QA explicitly states regressions were checked.
+3. Updated dashboard link or screenshot attached — reflecting the final published state. Google Sheets / Docs / ClickUp / dashboard tool URLs count.
+4. Stakeholder sign-off confirmed — a comment from someone other than the primary developer references the changes they reviewed. Ashritha Akkinepally's closure notes always count.
+5. Documentation updated — data dictionary, metric catalog, or dashboard inventory reflects the changes. PASS automatically if the enhancement is a pure visual/filter tweak with no metric definition change.
+6. Publish and access verified — confirmation that changes are live in the correct workspace, no broken embeds or permission issues. A "moved to Done" / "published" / "live" statement counts."""
 }
 
 
@@ -302,7 +335,8 @@ def _fix_bq_check_false_fail(content: str, description: str) -> str:
         # Only replace the SUMMARY if ALL 6 checks now pass.
         # If other checks still fail, the LLM's original summary is still accurate
         # for those failures — overwriting it with "all passed" would be wrong.
-        total_passes = new_content.count("✅ PASS")
+        _cb = re.search(r"CHECKS:\n(.*?)(?=\nSUMMARY:|\nMASTER TICKET:|$)", new_content, re.DOTALL)
+        total_passes = len(re.findall(r'\|\s*✅\s*PASS\s*\|', _cb.group(1))) if _cb else 0
         if total_passes >= 6:
             new_content = re.sub(
                 r'(SUMMARY:.*)',
@@ -363,6 +397,88 @@ def _fix_bi_closure_source_check_false_fail(content: str, description: str, gate
         content,
         count=1
     )
+
+
+# Title-level signals that override list-name detection for the BI sub-track.
+# Used when a ticket is in a Sprint/Phase list (no Feature/Enhancement signal)
+# AND has no prior SI INTAKE verdict to read.
+_ENHANCEMENT_TITLE_KEYWORDS = re.compile(
+    r'\b(enhance|enhancement|enhancing|update existing|modify existing|modify dashboard|tweak|adjust filter|add filter|change filter|rework existing)\b',
+    re.IGNORECASE
+)
+
+
+def _score_checks(content: str) -> tuple[int, int, str, bool]:
+    """
+    Score the LLM's checks table. Returns (passes, total, display, passed).
+
+    Two modes:
+      • Standard mode (6 required): passes = count of ✅ PASS, total = 6,
+        passed = (passes == 6). Used by every gate except BI Enhancement INTAKE.
+      • Enhancement INTAKE mode (3 required + 3 optional): only the (REQUIRED)
+        rows determine pass/fail. (OPTIONAL) rows show up as bonus.
+        Detected by presence of "(REQUIRED)" / "(OPTIONAL)" markers in the table.
+        passes = required PASS count (so auto-complete logic still sees a number).
+    """
+    checks_match = re.search(r"CHECKS:\n(.*?)(?=\nSUMMARY:|\nMASTER TICKET:|$)", content, re.DOTALL)
+    if not checks_match:
+        # Fall back to LLM-stated SCORE if the checks table didn't parse
+        score_match = re.search(r"SCORE:\s*(\d+)/6", content, re.IGNORECASE)
+        n = int(score_match.group(1)) if score_match else 0
+        return n, 6, f"{n}/6", n == 6
+
+    checks_table = checks_match.group(1)
+    if "(REQUIRED)" in checks_table or "(OPTIONAL)" in checks_table:
+        required_results = re.findall(r'\|\s*\d+\s*\|[^|]*\(REQUIRED\)[^|]*\|\s*([✅❌])', checks_table)
+        optional_results = re.findall(r'\|\s*\d+\s*\|[^|]*\(OPTIONAL\)[^|]*\|\s*([✅❌])', checks_table)
+        req_pass = sum(1 for r in required_results if r == '✅')
+        opt_pass = sum(1 for r in optional_results if r == '✅')
+        req_total = len(required_results) or 3
+        opt_total = len(optional_results) or 3
+        passed = req_total > 0 and req_pass == req_total
+        return req_pass, req_total, f"{req_pass}/{req_total} required + {opt_pass}/{opt_total} bonus", passed
+
+    n = len(re.findall(r'\|\s*✅\s*PASS\s*\|', checks_table))
+    return n, 6, f"{n}/6", n == 6
+
+
+def _detect_bi_subtrack(task: dict, raw_comments: list) -> tuple[str, str]:
+    """
+    Decide whether a BI ticket is a new-build or an enhancement.
+
+    Returns (subtrack, reason) where subtrack is "new" or "enhancement".
+
+    Priority (highest → lowest):
+      1. Prior SI INTAKE comment with a cached Sub-track verdict — solves the
+         "ticket moved into Sprint 45" problem where list.name no longer matches.
+      2. list.name — Feature/Features → new; Enhancement/Enhancements → enhancement.
+      3. Title keyword — "enhance", "update existing", etc → enhancement.
+      4. Default → enhancement (lighter ruleset; under-flag rather than over-flag).
+    """
+    # 1. Cached verdict from prior SI INTAKE comment
+    for c in raw_comments or []:
+        text = extract_comment_text(c)
+        if "SubInspector — INTAKE Gate" in text:
+            if "Sub-track: BI Enhancement" in text:
+                return "enhancement", "cached from prior INTAKE comment"
+            if "Sub-track: BI New Build" in text:
+                return "new", "cached from prior INTAKE comment"
+
+    # 2. List name
+    list_name = ((task.get("list") or {}).get("name") or "").strip().lower()
+    if list_name in ("enhancement", "enhancements"):
+        return "enhancement", f"list.name='{list_name}'"
+    if list_name in ("feature", "features"):
+        return "new", f"list.name='{list_name}'"
+
+    # 3. Title keyword
+    title = task.get("name", "") or ""
+    if _ENHANCEMENT_TITLE_KEYWORDS.search(title):
+        return "enhancement", "enhancement keyword in title"
+
+    # 4. Default — enhancement is the lighter ruleset
+    return "enhancement", "default (no list/title signal)"
+
 
 _CLOSURE_ARTIFACT_PATTERNS = re.compile(
     r'\b('
@@ -785,26 +901,28 @@ async def read_attachment(url, filename):
             elif ext in ("png", "jpg", "jpeg", "gif", "webp"):
                 b64 = base64.b64encode(raw).decode()
                 mime = {"png": "image/png", "gif": "image/gif", "webp": "image/webp"}.get(ext, "image/jpeg")
-                async with httpx.AsyncClient(timeout=30) as vc:
-                    vr = await vc.post(
-                        GROQ_URL,
-                        headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
-                        json={
-                            "model": "meta-llama/llama-4-scout-17b-16e-instruct",
-                            "max_tokens": 500,
-                            "messages": [{
-                                "role": "user",
-                                "content": [
-                                    {"type": "text", "text": "Describe what this image shows in the context of a data/BI ticket. Include any numbers, charts, tables, or UI elements visible."},
-                                    {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
-                                ]
-                            }]
-                        }
-                    )
-                    vr_data = vr.json()
-                    if "choices" not in vr_data:
-                        return f"[Image: {filename}] (vision API error: {vr_data.get('error', {}).get('message', vr_data)})"
-                    desc = vr_data["choices"][0]["message"]["content"]
+                sem = await _get_groq_sem()
+                async with sem:
+                    async with httpx.AsyncClient(timeout=30) as vc:
+                        vr = await vc.post(
+                            GROQ_URL,
+                            headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+                            json={
+                                "model": "meta-llama/llama-4-scout-17b-16e-instruct",
+                                "max_tokens": 500,
+                                "messages": [{
+                                    "role": "user",
+                                    "content": [
+                                        {"type": "text", "text": "Describe what this image shows in the context of a data/BI ticket. Include any numbers, charts, tables, or UI elements visible."},
+                                        {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
+                                    ]
+                                }]
+                            }
+                        )
+                        vr_data = vr.json()
+                        if "choices" not in vr_data:
+                            return f"[Image: {filename}] (vision API error: {vr_data.get('error', {}).get('message', vr_data)})"
+                        desc = vr_data["choices"][0]["message"]["content"]
                 return f"[Image: {filename}]\n{desc}"
 
             else:
@@ -1078,12 +1196,23 @@ async def evaluate_gate(gate, task, tier_override=None):
             or any(kw in (task.get("description") or "").lower()[:1000] for kw in bi_keywords)
         )
     bi_line = "Ticket Type: BI — use the BI-specific checklist, NOT the generic checklist.\n" if is_bi else "Ticket Type: DE (non-BI) — use the generic checklist.\n"
+
+    # BI sub-track: only meaningful when is_bi=True. Picks between "new build"
+    # (existing BI checklist) and "enhancement" (new lighter ruleset with 3 req + 3 opt at INTAKE).
+    bi_subtrack_line = ""
+    bi_subtrack = None
+    if is_bi:
+        bi_subtrack, subtrack_reason = _detect_bi_subtrack(task, raw_comments)
+        subtrack_label = "ENHANCEMENT" if bi_subtrack == "enhancement" else "NEW BUILD"
+        bi_subtrack_line = f"BI Sub-track: {subtrack_label} — use the BI {subtrack_label} checklist. Detection reason: {subtrack_reason}.\n"
+        print(f"[AGENT] BI sub-track: {bi_subtrack} ({subtrack_reason})", flush=True)
     print(f"[AGENT] BI detected: {is_bi}", flush=True)
 
     tier_line = f"Tier Override: {tier_override} (use this tier — do not infer)\n" if tier_override else ""
     user_message = (
         f"Gate: {gate}\n"
         f"{bi_line}"
+        f"{bi_subtrack_line}"
         f"{tier_line}"
         f"Task: {task_name}\n"
         f"Status: {(task.get('status') or {}).get('status', '')}\n"
@@ -1152,11 +1281,12 @@ async def evaluate_gate(gate, task, tier_override=None):
     last_error = None
     primary, fallback = "llama-3.3-70b-versatile", "llama-3.1-8b-instant"
 
-    async with _GROQ_SEM:
+    sem = await _get_groq_sem()
+    async with sem:
         try:
             content = await _call_groq(primary)
             print(f"[AGENT] Groq OK — model={primary}", flush=True)
-            return content, raw_comments, comments_text_capped
+            return content, raw_comments, comments_text_capped, bi_subtrack
         except _RateLimitError as e:
             print(f"[AGENT] {primary} rate limited (retry-after={e.retry_after}s) — switching to {fallback} immediately", flush=True)
             last_error = e
@@ -1171,7 +1301,7 @@ async def evaluate_gate(gate, task, tier_override=None):
             try:
                 content = await _call_groq(fallback)
                 print(f"[AGENT] Groq OK — model={fallback} attempt={attempt+1}", flush=True)
-                return content, raw_comments, comments_text_capped
+                return content, raw_comments, comments_text_capped, bi_subtrack
             except _RateLimitError as e:
                 wait_sec = e.retry_after  # honour Groq's own Retry-After value
                 print(f"[AGENT] {fallback} rate limited (attempt {attempt+1}/4, retry-after={wait_sec}s) — waiting", flush=True)
@@ -1241,11 +1371,16 @@ async def revert_status(task_id, status) -> bool:
             return False
 
 
-def format_comment(gate, content, score, passed, prior_failures=0, reverted_to=None, advisory=False, assignees=None):
+def format_comment(gate, content, score_display, passed, prior_failures=0, reverted_to=None, advisory=False, assignees=None, bi_subtrack=None):
     """Parse LLM output and return a ClickUp rich-text comment block array.
 
     advisory=True: compact report for out-of-scope tasks — no status revert,
     no escalation, no next-steps. Just the gate result + per-check gaps.
+
+    score_display: pre-formatted string (e.g. "5/6" or "3/3 required + 2/3 bonus").
+    bi_subtrack: "new" / "enhancement" — when set, emits a "Sub-track: BI ..."
+      line that later gates can read to recover the verdict after the ticket
+      has been moved into a sprint list.
     """
 
     # ── extract pieces from LLM response ──────────────────────────────────
@@ -1272,8 +1407,17 @@ def format_comment(gate, content, score, passed, prior_failures=0, reverted_to=N
         {"text": "\n"},
         {"text": "🏷 Tier: ", "attributes": {"bold": True}},
         {"text": f"{tier_line}\n"},
+    ]
+    if bi_subtrack:
+        # Emitted in plain text so _detect_bi_subtrack can grep for it in later gates.
+        subtrack_label = "BI Enhancement" if bi_subtrack == "enhancement" else "BI New Build"
+        blocks += [
+            {"text": "🎯 Sub-track: ", "attributes": {"bold": True}},
+            {"text": f"{subtrack_label}\n"},
+        ]
+    blocks += [
         {"text": "📊 Score: ", "attributes": {"bold": True}},
-        {"text": f"{score}/6  |  {result_emoji} {result_word}\n"},
+        {"text": f"{score_display}  |  {result_emoji} {result_word}\n"},
     ]
     if reverted_to:
         blocks += [
@@ -1461,20 +1605,22 @@ Important rules:
 - No extra commentary outside the format above"""
 
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                GROQ_URL,
-                headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
-                json={
-                    "model": "llama-3.1-8b-instant",
-                    "temperature": 0,
-                    "max_tokens": 400,
-                    "messages": [{"role": "user", "content": prompt}]
-                }
-            )
-            data = resp.json()
-            if "choices" in data:
-                return data["choices"][0]["message"]["content"].strip()
+        sem = await _get_groq_sem()
+        async with sem:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(
+                    GROQ_URL,
+                    headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+                    json={
+                        "model": "llama-3.1-8b-instant",
+                        "temperature": 0,
+                        "max_tokens": 400,
+                        "messages": [{"role": "user", "content": prompt}]
+                    }
+                )
+                data = resp.json()
+                if "choices" in data:
+                    return data["choices"][0]["message"]["content"].strip()
     except Exception as e:
         print(f"[AGENT] generate_auto_closing_note failed: {e}", flush=True)
     return ""
@@ -1697,7 +1843,7 @@ async def process_webhook(payload):
     _IN_FLIGHT[_dedup_key] = True
     try:
         try:
-            content, raw_comments, comments_text_for_note = await evaluate_gate(gate, task, tier_override=tier_override)
+            content, raw_comments, comments_text_for_note, bi_subtrack = await evaluate_gate(gate, task, tier_override=tier_override)
         except Exception as e:
             err_type = type(e).__name__
             err_msg = str(e)[:300]
@@ -1742,25 +1888,19 @@ async def process_webhook(payload):
         # are CLOSURE concerns, not PRE-EXEC scope or dependency gaps.
         content = _fix_preexec_closure_artifact_false_fail(content, gate)
 
-        # Count ✅ PASS only when it appears as a standalone result-column cell
-        # (surrounded by pipes). Simple .count("✅ PASS") would also catch any
-        # "✅ PASS" text the LLM writes in a Detail column, inflating the score.
-        checks_match = re.search(r"CHECKS:\n(.*?)(?=\nSUMMARY:|\nMASTER TICKET:|$)", content, re.DOTALL)
-        if checks_match:
-            score = str(len(re.findall(r'\|\s*✅\s*PASS\s*\|', checks_match.group(1))))
-        else:
-            score_match = re.search(r"SCORE:\s*(\d+)/6", content, re.IGNORECASE)
-            score = score_match.group(1) if score_match else "0"
-
-        passed = int(score.strip()) == 6
+        # Unified scoring — handles standard 6/6 mode AND BI Enhancement INTAKE's
+        # 3-required + 3-optional model. Display string is what goes into the comment.
+        score_n, _score_total, score_display, passed = _score_checks(content)
 
         # ── AUTO-COMPLETE ──────────────────────────────────────────────────────────
         # When CLOSURE gate scores 5/6 and the one failing check is a soft formality
         # (closing note, stakeholder mention, docs N/A), SI writes the missing
         # content, posts it, and moves the ticket to complete automatically.
         # Disabled in advisory mode — never modify tasks outside ENFORCEMENT_FOLDERS.
+        # CLOSURE is always 6/6 scoring (no enhancement-INTAKE 3-required mode),
+        # so score_n is safely the count-of-passes here.
         if not advisory_mode and gate == "CLOSURE" and not passed and status.lower() not in ("complete", "done"):
-            can_fix, failing_checks = _can_auto_complete(int(score.strip()), content)
+            can_fix, failing_checks = _can_auto_complete(score_n, content)
             if can_fix:
                 print(f"[AGENT] Auto-complete triggered — soft gaps: {failing_checks}", flush=True)
                 closing_note = await generate_auto_closing_note(task, comments_text_for_note)
@@ -1769,17 +1909,25 @@ async def process_webhook(payload):
                         closing_note = _tp.sub("[re-check command]", closing_note)
                     await post_comment(
                         task_id,
-                        f"🤖 **SubInspector — Auto-Generated Closing Note**\n\n{closing_note}\n\n"
-                        f"_Auto-generated by SubInspector based on ticket context and comments._",
+                        [
+                            {"text": "🤖 SubInspector — Auto-Generated Closing Note\n", "attributes": {"bold": True}},
+                            {"text": "\n"},
+                            {"text": closing_note + "\n"},
+                            {"text": "\n"},
+                            {"text": "Auto-generated by SubInspector based on ticket context and comments."},
+                        ],
                         reply_to_comment_id=trigger_comment_id
                     )
                     moved = await revert_status(task_id, "complete")
-                    status_line = "✅ Ticket moved to **complete**." if moved else "⚠️ Could not update status — please move manually."
+                    status_line = "Ticket moved to complete ✅" if moved else "Could not update status — please move manually ⚠️"
                     await post_comment(
                         task_id,
-                        f"🤖 **SubInspector — Auto-Completed** | Score {score}/6\n\n"
-                        f"The only gap (`{'`, `'.join(failing_checks)}`) was a formality SI could fill.\n"
-                        f"Closing note posted above. {status_line}",
+                        [
+                            {"text": f"🤖 SubInspector — Auto-Completed | Score {score_display}\n", "attributes": {"bold": True}},
+                            {"text": "\n"},
+                            {"text": f"The only gap ({', '.join(failing_checks)}) was a formality SI could fill.\n"},
+                            {"text": f"Closing note posted above. {status_line}"},
+                        ],
                         reply_to_comment_id=trigger_comment_id
                     )
                     print(f"[AGENT] Auto-complete done for {task_id}", flush=True)
@@ -1804,7 +1952,7 @@ async def process_webhook(payload):
             if not success:
                 print(f"[AGENT] ⚠️ Revert failed — comment will NOT claim status was changed", flush=True)
 
-        comment = format_comment(gate, content, score, passed, prior_failures, reverted_to=reverted_to, advisory=advisory_mode, assignees=task.get("assignees", []))
+        comment = format_comment(gate, content, score_display, passed, prior_failures, reverted_to=reverted_to, advisory=advisory_mode, assignees=task.get("assignees", []), bi_subtrack=bi_subtrack)
 
         await post_comment(task_id, comment, reply_to_comment_id=trigger_comment_id)
 
@@ -1887,7 +2035,10 @@ async def scan_and_backfill(folder_id: str = None, dry_run: bool = False, since_
     import time as _time
     target_folder = folder_id or ENFORCEMENT_FOLDERS[0]
     since_ms = int((_time.time() - since_days * 86400) * 1000) if since_days else None
-    print(f"[SCAN] Starting backfill — folder={target_folder} dry_run={dry_run} since_days={since_days}", flush=True)
+    # Advisory if the target folder isn't in the enforcement list — keeps client-folder
+    # backfill comments free of "Next Steps" / Komal escalation language.
+    is_advisory_scan = target_folder not in ENFORCEMENT_FOLDERS
+    print(f"[SCAN] Starting backfill — folder={target_folder} dry_run={dry_run} since_days={since_days} advisory={is_advisory_scan}", flush=True)
 
     tasks = await fetch_folder_tasks(target_folder)
 
@@ -1935,7 +2086,7 @@ async def scan_and_backfill(folder_id: str = None, dry_run: bool = False, since_
 
         try:
             full_task = await fetch_task(task_id)
-            content, raw_comments, _ = await evaluate_gate(expected_gate, full_task)
+            content, raw_comments, _, bi_subtrack = await evaluate_gate(expected_gate, full_task)
 
             # Strip any trigger phrase the LLM may have hallucinated
             for _tp in _TRIGGER_PATTERNS:
@@ -1954,14 +2105,7 @@ async def scan_and_backfill(folder_id: str = None, dry_run: bool = False, since_
                 results["errors"] += 1
                 continue
 
-            checks_match = re.search(r"CHECKS:\n(.*?)(?=\nSUMMARY:|\nMASTER TICKET:|$)", content, re.DOTALL)
-            if checks_match:
-                score = str(len(re.findall(r'\|\s*✅\s*PASS\s*\|', checks_match.group(1))))
-            else:
-                score_match = re.search(r"SCORE:\s*(\d+)/6", content, re.IGNORECASE)
-                score = score_match.group(1) if score_match else "0"
-
-            passed        = int(score.strip()) == 6
+            _score_n, _score_total, score_display, passed = _score_checks(content)
             prior_failures = await count_subinspector_failures(task_id, gate=expected_gate, raw_comments=raw_comments)
 
             # Double-check just before posting — guards against two concurrent scans
@@ -1971,11 +2115,12 @@ async def scan_and_backfill(folder_id: str = None, dry_run: bool = False, since_
                 results["already_covered"] += 1
                 continue
 
-            # Backfill comments never revert status — ticket may have moved on since
-            comment = format_comment(expected_gate, content, score, passed, prior_failures, reverted_to=None, assignees=full_task.get("assignees", []))
+            # Backfill comments never revert status — ticket may have moved on since.
+            # Advisory scans get advisory=True so no enforcement/escalation language is posted.
+            comment = format_comment(expected_gate, content, score_display, passed, prior_failures, reverted_to=None, advisory=is_advisory_scan, assignees=full_task.get("assignees", []), bi_subtrack=bi_subtrack)
             await post_comment(task_id, comment)
             results["posted"] += 1
-            print(f"[SCAN] Posted {expected_gate} gate on {task_id} — score={score}/6 passed={passed}", flush=True)
+            print(f"[SCAN] Posted {expected_gate} gate on {task_id} — score={score_display} passed={passed}", flush=True)
 
             await asyncio.sleep(8)   # rate-limit buffer — Groq free tier is 6000 TPM, each ticket ~4000-6000 tokens
 
