@@ -777,6 +777,9 @@ def determine_gate(event, status, history_items):
             return "CLOSURE", False, None, None
         elif status in PRE_EXEC_STATUSES:
             return "PRE-EXECUTION", False, None, None
+        else:
+            print(f"[AGENT] Unknown status '{status}' — not in CLOSURE_STATUSES or PRE_EXEC_STATUSES. Skipping webhook.", flush=True)
+            return None, False, None, None
 
     # Manual si check comment → report only, never revert (is_dry_run=True)
     if event == "taskCommentPosted":
@@ -1706,6 +1709,8 @@ async def process_webhook(payload):
                 if comment_id:
                     print(f"[AGENT] Text extraction from payload failed — fetching comment {comment_id} from API", flush=True)
                     raw_text = await fetch_comment_text_from_api(comment_id)
+                else:
+                    print(f"[AGENT] Text extraction from payload failed and no comment_id found — cannot fetch from API. Proceeding with empty text.", flush=True)
 
             print(f"[AGENT] Bot-account comment text: {repr(raw_text[:120])}", flush=True)
 
@@ -1784,11 +1789,11 @@ async def process_webhook(payload):
 
     advisory_mode = not in_scope
 
-    status = (task.get("status") or {}).get("status", "")
+    status = (task.get("status") or {}).get("status", "").lower()
     previous_status = ""
     if history_items:
         before = history_items[0].get("before") or {}
-        previous_status = (before.get("status", "") if isinstance(before, dict) else "") or ""
+        previous_status = ((before.get("status", "") if isinstance(before, dict) else "") or "").lower()
 
     gate, is_dry_run, trigger_comment_id, tier_override = determine_gate(event, status, history_items)
 
@@ -1835,6 +1840,8 @@ async def process_webhook(payload):
         previous_status = CLOSURE_REVERT_MAP.get(status.lower(), "")
         if previous_status:
             print(f"[AGENT] No previous_status in payload — CLOSURE_REVERT_MAP: '{status}' → '{previous_status}'", flush=True)
+        else:
+            print(f"[AGENT] No previous_status in payload — CLOSURE_REVERT_MAP: '{status}' NOT FOUND in revert map. Revert will be skipped.", flush=True)
     if gate == "PRE-EXECUTION" and not previous_status and not advisory_mode:
         previous_status = PRE_EXEC_REVERT_MAP.get(status.lower(), "open")
         print(f"[AGENT] No previous_status in payload — PRE_EXEC_REVERT_MAP: '{status}' → '{previous_status}'", flush=True)
