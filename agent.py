@@ -1290,14 +1290,9 @@ async def evaluate_gate(gate, task, tier_override=None):
                 raise ValueError(f"Groq error on {model} (HTTP {response.status_code}): {data}")
             return data["choices"][0]["message"]["content"]
 
-    # Strategy:
-    # 1. Try llama-3.3-70b-versatile once — best quality, but strict rate limit (6k TPM free).
-    # 2. On rate limit → immediately fall back to gemma-7b-it (smaller, different rate limits, widely available).
-    # 3. Retry gemma up to 4× honouring the Retry-After header from each 429.
-    # If all attempts fail with rate limits, raise _RateLimitError so the caller
-    # can silently skip rather than posting a confusing error comment.
-    last_error = None
-    primary, fallback = "llama-3.3-70b-versatile", "gemma-7b-it"
+    # Strategy: Try primary model once. If it fails for any reason (rate limit, model not found, etc),
+    # skip silently. Avoids cascading failures from unavailable fallback models.
+    primary = "llama-3.3-70b-versatile"
 
     sem = await _get_groq_sem()
     async with sem:
@@ -1306,35 +1301,11 @@ async def evaluate_gate(gate, task, tier_override=None):
             print(f"[AGENT] Groq OK — model={primary}", flush=True)
             return content, raw_comments, comments_text_capped, bi_subtrack
         except _RateLimitError as e:
-            print(f"[AGENT] {primary} rate limited (retry-after={e.retry_after}s) — switching to {fallback} immediately", flush=True)
-            last_error = e
-        except (httpx.TimeoutException, httpx.ConnectError) as e:
-            print(f"[AGENT] {primary} network error: {e} — switching to {fallback}", flush=True)
-            last_error = e
+            print(f"[AGENT] {primary} rate limited (retry-after={e.retry_after}s) — skipping webhook", flush=True)
+            raise _RateLimitError(f"Groq rate limited, skipping", retry_after=e.retry_after)
         except Exception as e:
-            print(f"[AGENT] {primary} failed: {e} — switching to {fallback}", flush=True)
-            last_error = e
-
-        for attempt in range(4):
-            try:
-                content = await _call_groq(fallback)
-                print(f"[AGENT] Groq OK — model={fallback} attempt={attempt+1}", flush=True)
-                return content, raw_comments, comments_text_capped, bi_subtrack
-            except _RateLimitError as e:
-                wait_sec = e.retry_after  # honour Groq's own Retry-After value
-                print(f"[AGENT] {fallback} rate limited (attempt {attempt+1}/4, retry-after={wait_sec}s) — waiting", flush=True)
-                last_error = e
-                await asyncio.sleep(wait_sec)
-            except (httpx.TimeoutException, httpx.ConnectError) as e:
-                print(f"[AGENT] {fallback} network error attempt {attempt+1}: {e}", flush=True)
-                last_error = e
-                await asyncio.sleep(5)
-            except Exception as e:
-                print(f"[AGENT] {fallback} failed attempt {attempt+1}: {e}", flush=True)
-                last_error = e
-                await asyncio.sleep(5)
-
-        raise last_error or ValueError("Groq failed on all models")
+            print(f"[AGENT] {primary} failed: {e} — skipping webhook", flush=True)
+            raise _RateLimitError(f"Groq failed: {str(e)[:100]}", retry_after=5)
 
 
 async def post_comment(task_id, comment, reply_to_comment_id=None):
