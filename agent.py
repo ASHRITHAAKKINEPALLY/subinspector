@@ -1292,12 +1292,12 @@ async def evaluate_gate(gate, task, tier_override=None):
 
     # Strategy:
     # 1. Try llama-3.3-70b-versatile once — best quality, but strict rate limit (6k TPM free).
-    # 2. On rate limit → immediately fall back to mixtral-8x7b-32768 (25k TPM, widely available).
-    # 3. Retry mixtral up to 4× honouring the Retry-After header from each 429.
+    # 2. On rate limit → immediately fall back to gemma-7b-it (smaller, different rate limits, widely available).
+    # 3. Retry gemma up to 4× honouring the Retry-After header from each 429.
     # If all attempts fail with rate limits, raise _RateLimitError so the caller
     # can silently skip rather than posting a confusing error comment.
     last_error = None
-    primary, fallback = "llama-3.3-70b-versatile", "mixtral-8x7b-32768"
+    primary, fallback = "llama-3.3-70b-versatile", "gemma-7b-it"
 
     sem = await _get_groq_sem()
     async with sem:
