@@ -195,6 +195,19 @@ Evaluate the ticket description against these 7 mandatory sections. ALL sections
 
 7. RCA (Root Cause Analysis) — Why is this issue happening? Describe the root cause — sync delays, transformation gaps, manual errors, config problems, missing logic, schema misalignment, or upstream dependencies. Understanding the root helps prevent recurrence. FAIL if missing or says "cause unclear".
 
+OUTPUT FORMAT:
+You MUST report each of the 7 sections SEPARATELY in the gate check result, with one row per section:
+| # | Section Name | Result | Details |
+| 1 | Problem Statement | PASS/FAIL | ... |
+| 2 | Objective | PASS/FAIL | ... |
+| 3 | Impact | PASS/FAIL | ... |
+| 4 | Acceptance Criteria | PASS/FAIL | ... |
+| 5 | Notes / Risks | PASS/FAIL | ... |
+| 6 | Solution Approach | PASS/FAIL | ... |
+| 7 | RCA (Root Cause Analysis) | PASS/FAIL | ... |
+
+CRITICAL: Section 6 (Solution Approach) and Section 7 (RCA) are SEPARATE rows. Do NOT combine them.
+
 SCORING:
 - PASS: All 7 sections present, substantive, specific, and non-TBD.
 - FAIL: Any section missing, empty, contains placeholder text (TBD, "to be determined", "will update", "TBA"), or is too vague to act on.
