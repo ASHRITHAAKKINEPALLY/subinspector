@@ -178,13 +178,28 @@ SUMMARY: [one sentence verdict + most critical gap if FAIL]"""
 # Gate-specific checklists (~250 tokens each) — only the relevant one is sent
 _GATE_CHECKS = {
     "INTAKE": """
-INTAKE GATE — Generic (6 checks):
-1. Title-Description Coherence — title and problem statement describe the SAME work. PASS if they are about the same general area, entity, or goal even if worded differently or at different levels of detail. FAIL ONLY if the title and description are clearly about two different things (e.g. title says "revenue dashboard" but description is about user churn pipeline).
-2. Steps to Reproduce / Context — new person can understand without a meeting: navigation, filters, date range, context.
-3. Definition of Done — explicit, observable end state stated. FAIL if vague ("fix it") or unmeasurable.
-4. Screenshots/Evidence — INTAKE ONLY RULE: work has NOT started yet, so finished output does NOT exist. PASS if any of these are present: (a) screenshot of the current/broken state showing the problem, (b) description or sample of expected output format (table columns, sample rows, metric name + formula), (c) mockup or wireframe. FAIL ONLY if the ticket makes a claim about wrong/missing data or a UI issue AND has absolutely no screenshot, no format description, and no example of any kind. PLANNING/INITIATIVE EXCEPTION: If the ticket is a planning, strategy, or initiative ticket where the deliverable IS a new artifact to be created (deck, document, presentation, plan, design spec, narrative), PASS this check automatically — no evidence of a non-existent artifact can exist at intake.
-5. Mandatory Fields — Problem Statement, Expected Output, Definition of Done, Data Source all present and non-empty with substantive content. PASS if the BA sections contain clear intent and value even if not formatted as a strict user-story template — do not fail for phrasing style when substance is present.
-6. DE Actionability — expected output clear, BQ path present if DE work is in scope, no TBDs. Actionable without a meeting. PASS AUTOMATICALLY when the ticket involves no data engineering work (no BQ query, no pipeline, no table build, no ingestion, no transformation, no SQL). When DE work IS in scope: scan the entire description for any string matching project.dataset.table (e.g. pulse-instanthydration.dataset.tablename or project.dataset.table_*). PASS if at least one such path is found. Do NOT fail because paths are labeled "proposed"/"target" or have wildcard suffixes — new-build tickets provide target paths before the table exists, and that is acceptable. FAIL only when DE work is explicitly in scope AND no BQ path of any kind appears anywhere in the description.
+INTAKE GATE — DE Tickets (7 required sections):
+Evaluate the ticket description against these 7 mandatory sections. ALL sections must be present, substantive (not TBD/placeholder), and complete. Any section missing, empty, or placeholder = FAIL.
+
+1. Problem Statement — What problem or limitation is being addressed? What's currently missing, inefficient, inconsistent, or error-prone? Why is this important now? Must be concrete and specific — not just a restatement of the title. FAIL if vague, missing, or just restates title.
+
+2. Objective — What exactly needs to be done? Mention specific models, logic, fields, or automation being built or changed. Is it a fix, enhancement, or new feature? FAIL if the objective is unclear, vague ("improve it"), or missing concrete deliverables.
+
+3. Impact — Why is this change valuable? Who benefits (analysts, dashboards, QA teams, other systems)? How does it improve data trust, accuracy, efficiency, or reduce manual work? FAIL if impact is missing, speculative, or unmeasured.
+
+4. Acceptance Criteria — When is this done? List 2–3 clear, observable outcomes that confirm completion (e.g., "bot runs without errors", "mismatch % reported in dashboard", "no schema breaks in downstream"). Must be measurable, not vague. FAIL if missing, vague ("complete the work"), or unmeasurable.
+
+5. Notes / Risks — Any SQL logic, edge cases, known risks, or dependencies? Mention affected models, config blocks, impacted reports, data quality concerns, or integration points. FAIL if complex work is in scope but Notes/Risks section is empty, TBD, or says "none identified without deeper investigation".
+
+6. Solution Approach — How will this be solved? Summarize the proposed implementation steps, tools to use (SQL, dbt, RPA, API, scripts), fallback logic, or automation flow. Must be actionable and specific enough to guide development. FAIL if missing, vague, or relies on "figure it out during development".
+
+7. RCA (Root Cause Analysis) — Why is this issue happening? Describe the root cause — sync delays, transformation gaps, manual errors, config problems, missing logic, schema misalignment, or upstream dependencies. Understanding the root helps prevent recurrence. FAIL if missing or says "cause unclear".
+
+SCORING:
+- PASS: All 7 sections present, substantive, specific, and non-TBD.
+- FAIL: Any section missing, empty, contains placeholder text (TBD, "to be determined", "will update", "TBA"), or is too vague to act on.
+
+The description structure and prose style do not matter — substance and completeness are what counts.
 
 INTAKE GATE — BI Tickets (use ONLY when user message says "Ticket Type: BI" AND "BI Sub-track: NEW BUILD"):
 1. Problem Statement names dashboard, target persona, and business value.
@@ -1277,12 +1292,12 @@ async def evaluate_gate(gate, task, tier_override=None):
 
     # Strategy:
     # 1. Try llama-3.3-70b-versatile once — best quality, but strict rate limit (6k TPM free).
-    # 2. On rate limit → immediately fall back to llama-3.1-8b-instant (20k TPM, no wait).
-    # 3. Retry 8b-instant up to 4× honouring the Retry-After header from each 429.
+    # 2. On rate limit → immediately fall back to mixtral-8x7b-32768 (25k TPM, widely available).
+    # 3. Retry mixtral up to 4× honouring the Retry-After header from each 429.
     # If all attempts fail with rate limits, raise _RateLimitError so the caller
     # can silently skip rather than posting a confusing error comment.
     last_error = None
-    primary, fallback = "llama-3.3-70b-versatile", "llama-3.1-8b-instant"
+    primary, fallback = "llama-3.3-70b-versatile", "mixtral-8x7b-32768"
 
     sem = await _get_groq_sem()
     async with sem:
