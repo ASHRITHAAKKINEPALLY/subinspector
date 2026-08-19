@@ -1292,7 +1292,7 @@ async def evaluate_gate(gate, task, tier_override=None):
 
     # Strategy: Try primary model once. If it fails for any reason (rate limit, model not found, etc),
     # skip silently. Avoids cascading failures from unavailable fallback models.
-    primary = "llama-3.3-70b-versatile"
+    primary = "openai/gpt-oss-120b"
 
     sem = await _get_groq_sem()
     async with sem:
