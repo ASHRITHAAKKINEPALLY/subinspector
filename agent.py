@@ -30,8 +30,13 @@ CLICKUP_API_KEY = os.environ.get("CLICKUP_API_KEY")
 ENFORCEMENT_FOLDERS = os.environ.get("ENFORCEMENT_FOLDERS", "90165998786").split(",")
 ENFORCEMENT_SPACES  = [x.strip() for x in os.environ.get("ENFORCEMENT_SPACES", "").split(",") if x.strip()]
 
-# DE Space time tracking check (independent from INTAKE/PRE-EXEC/CLOSURE gates)
+# DE time-tracking track (independent from INTAKE/PRE-EXEC/CLOSURE gates).
+# FOLDERS matches task.folder.id or task.list.id; SPACES matches task.space.id and
+# is the way to cover a whole space whose lists sit directly under it (no folder).
+# Keep the two apart — a space id will never equal a folder id, so mixing them
+# silently matches nothing.
 DE_TIME_TRACKING_FOLDERS = [x.strip() for x in os.environ.get("DE_TIME_TRACKING_FOLDERS", "90169104190").split(",") if x.strip()]
+DE_TIME_TRACKING_SPACES  = [x.strip() for x in os.environ.get("DE_TIME_TRACKING_SPACES", "90167921604").split(",") if x.strip()]
 
 # Client folders/spaces for advisory mode (comment only, no status changes).
 _DEFAULT_ADVISORY_FOLDERS = ",".join([
@@ -73,6 +78,7 @@ print(f"[AGENT] Startup check — ADVISORY_FOLDERS={ADVISORY_FOLDERS}", flush=Tr
 print(f"[AGENT] Startup check — ADVISORY_SPACES={ADVISORY_SPACES or '(not set — add via HF secret to catch master tickets)'}", flush=True)
 print(f"[AGENT] Startup check — ADVISORY_INTAKE_DELAY_SECONDS={ADVISORY_INTAKE_DELAY_SECONDS}s", flush=True)
 print(f"[AGENT] Startup check — DE_TIME_TRACKING_FOLDERS={DE_TIME_TRACKING_FOLDERS}", flush=True)
+print(f"[AGENT] Startup check — DE_TIME_TRACKING_SPACES={DE_TIME_TRACKING_SPACES}", flush=True)
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 CLICKUP_BASE = "https://api.clickup.com/api/v2"
@@ -1477,7 +1483,12 @@ async def _de_time_tracking_decide(task_id: str, before_status: str) -> None:
 
     folder_id = str((task.get("folder") or {}).get("id", ""))
     list_id   = str((task.get("list")   or {}).get("id", ""))
-    if folder_id not in DE_TIME_TRACKING_FOLDERS and list_id not in DE_TIME_TRACKING_FOLDERS:
+    space_id  = str((task.get("space")  or {}).get("id", ""))
+    if not (
+        folder_id in DE_TIME_TRACKING_FOLDERS
+        or list_id in DE_TIME_TRACKING_FOLDERS
+        or space_id in DE_TIME_TRACKING_SPACES
+    ):
         return
 
     status = ((task.get("status") or {}).get("status") or "").strip().lower()
@@ -1487,7 +1498,7 @@ async def _de_time_tracking_decide(task_id: str, before_status: str) -> None:
     assignees = task.get("assignees") or []
     assignee_ids = {str(a.get("id")) for a in assignees if a.get("id")}
     assignee_names = ", ".join(a.get("username") or a.get("email") or "?" for a in assignees) or "nobody"
-    print(f"[TIMETRACK] {task_id} entered Complete | folder={folder_id} | assignees={assignee_names} | prev='{before_status}'", flush=True)
+    print(f"[TIMETRACK] {task_id} entered Complete | folder={folder_id} list={list_id} space={space_id} | assignees={assignee_names} | prev='{before_status}'", flush=True)
 
     if not assignee_ids:
         print(f"[TIMETRACK] {task_id} has no assignee — nothing to verify, leaving as-is", flush=True)
