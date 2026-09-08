@@ -1,0 +1,23 @@
+# Secrets — HANDOVER.md carries API keys and HF Space secrets. Never commit.
+HANDOVER.md
+.env
+.env.*
+
+# Container / debug logs pulled from the HF Space
+hf_logs_*.txt
+
+# Local tooling
+.claude/
+.playwright-mcp/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# One-off scratch: incident cleanup scripts, ticket dumps, deck builder + output
+cleanup_spam*.py
+ticket_data.py
+build_deck.js
+*.pptx

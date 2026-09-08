@@ -39,14 +39,19 @@ Apply the checklist for the gate that will fire next based on the ticket's curre
 
 ### GATE 1 — INTAKE (fires on ticket creation)
 
-| # | Check | What I must include |
-|---|---|---|
-| 1 | Problem Statement | User-story format: "As a [persona] at IH, I want [capability], so that [value]." Must name the metric/area + a value-realization signal. Never just restate the title. |
-| 2 | Steps to Reproduce | Explicit nav path + filter/date range + which view/report + which number to look at. Followable by a new person without a meeting. |
-| 3 | Definition of Done | Observable end state — what artifact/output will change and exactly how to confirm it is complete. Never "fix it" or "update logic". |
-| 4 | Screenshots / Evidence | **INTAKE ONLY:** work has not started, so finished output does NOT exist yet. PASS if any of: (a) screenshot of the current/broken state, (b) description or sample of expected output format (table columns, sample rows, metric + formula), (c) mockup or wireframe. FAIL only if the ticket claims data/UI is wrong AND has zero screenshot, zero format example, zero mockup of any kind. |
-| 5 | Mandatory Fields | All required fields present and non-empty. Description must have substantive content under each heading, not just the heading itself. |
-| 6 | DE Actionability | Full BigQuery path (project.dataset.table) where data work is involved. No TBD language. All dependencies recorded. Actionable without a clarifying meeting. |
+**DE Tickets (7 required sections):**
+
+All 7 sections must be present, substantive, and complete. Any section missing, empty, or containing placeholder text (TBD, "to be determined", "will update", "TBA") = FAIL.
+
+| # | Section | What I must include |
+|---|---------|---|
+| 1 | Problem Statement | What problem or limitation are we addressing? What's currently missing, inefficient, inconsistent, or error-prone? Why is this important now? Must be concrete and specific — never just restate the title. |
+| 2 | Objective | What exactly needs to be done? Mention specific models, logic, fields, or automation being built or changed. Is it a fix, enhancement, or new feature? Must be clear and concrete. |
+| 3 | Impact | Why is this change valuable? Who benefits (analysts, dashboards, QA, other systems)? How does it improve data trust, accuracy, efficiency, or reduce manual work? |
+| 4 | Acceptance Criteria | When is this done? List 2–3 clear, observable outcomes that confirm completion (e.g., "bot runs without errors", "mismatch % reported", "no schema breaks"). Must be measurable, not vague. |
+| 5 | Notes / Risks | Any SQL logic, edge cases, known risks, or dependencies? Mention affected models, config blocks, impacted reports, data quality concerns. For complex work, this section must be filled — "none identified" without deeper investigation = FAIL. |
+| 6 | Solution Approach | How will this be solved? Summarize proposed steps, tools (SQL, dbt, RPA, scripts), fallback logic, or automation flow. Must be actionable and guide development. |
+| 7 | RCA (Root Cause Analysis) | Why is this issue happening? Describe the root cause — sync delays, transformation gaps, manual errors, config problems, schema misalignment. Understanding the root prevents recurrence. |
 
 **BI tickets (title has [BI] or references Tableau/Power BI/dashboard):**
 1. Problem statement names dashboard + target persona + business value
@@ -107,12 +112,16 @@ Apply the checklist for the gate that will fire next based on the ticket's curre
 
 ## 5. Common FAIL Triggers to Avoid
 
-- Problem statement that just restates the title → rewrite in user-story format
-- "in BQ" or "the normal table" instead of full path → always write `project.dataset.table`
-- Definition of Done that says "fix it" or "update the logic" → name the artifact and how to verify
-- Any section heading with no content under it → fill every heading
-- TBD / N/A to fill later / will update → never leave these in an active ticket
-- No evidence attached when claim is about UI/output differences → attach screenshot or link
+**INTAKE Gate (DE Tickets) — 7 sections required:**
+- Problem Statement that just restates title → must describe the actual problem, inefficiency, or gap
+- Objective that is vague ("improve it") → must name specific deliverables (models, logic, fields, automations)
+- Impact that is speculative ("should help") → must name who benefits and how (accuracy %, time saved, manual work eliminated)
+- Acceptance Criteria that is unmeasurable ("complete the work") → must list 2–3 observable outcomes (query runs, metric reported, no breaks)
+- Notes/Risks section empty or "none identified" → for complex work, must discuss edge cases, affected models, data quality concerns
+- Solution Approach that is vague ("figure it out") → must outline steps, tools (SQL, dbt, scripts), and fallback logic
+- RCA section missing or "cause unclear" → must explain root cause (sync delay, transformation gap, manual error, config issue)
+- Any section with TBD / "to be determined" / "will update" / placeholder text → every section must be substantive on submission
+- Any section heading with no content under it → fill every heading with concrete details
 
 ---
 
