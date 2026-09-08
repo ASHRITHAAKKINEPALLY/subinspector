@@ -1882,7 +1882,13 @@ async def process_webhook(payload):
 
     # ── DE Time Tracking Check (independent from gate logic) ──────────────────
     # Runs independently on taskStatusUpdated → Complete for DE Space tickets
-    if folder_id in DE_TIME_TRACKING_FOLDERS and event == "taskStatusUpdated" and status == "complete":
+    # Check by folder_id, list_id, or space_id to catch all tickets in the space/folder
+    in_de_time_tracking = (
+        folder_id in DE_TIME_TRACKING_FOLDERS
+        or list_id in DE_TIME_TRACKING_FOLDERS
+        or space_id == "3369097"  # Data Engineering space ID
+    )
+    if in_de_time_tracking and event == "taskStatusUpdated" and status == "complete":
         print(f"[AGENT] DE Time Tracking Check — triggered", flush=True)
         await check_de_time_tracking(task, previous_status)
         # Note: this runs independently AND the gate logic below still runs
