@@ -466,8 +466,10 @@ def _score_checks(content: str) -> tuple[int, int, str, bool]:
         passed = req_total > 0 and req_pass == req_total
         return req_pass, req_total, f"{req_pass}/{req_total} required + {opt_pass}/{opt_total} bonus", passed
 
-    n = len(re.findall(r'\|\s*✅\s*PASS\s*\|', checks_table))
-    return n, 6, f"{n}/6", n == 6
+    # Count total checks dynamically (supports both 6-check and 7-check gates)
+    n_pass = len(re.findall(r'\|\s*✅\s*PASS\s*\|', checks_table))
+    n_total = len(re.findall(r'\|\s*\d+\s*\|', checks_table))
+    return n_pass, n_total, f"{n_pass}/{n_total}", n_pass == n_total
 
 
 def _detect_bi_subtrack(task: dict, raw_comments: list) -> tuple[str, str]:
