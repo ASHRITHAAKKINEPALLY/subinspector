@@ -72,6 +72,7 @@ print(f"[AGENT] Startup check — ENFORCEMENT_SPACES={ENFORCEMENT_SPACES or '(no
 print(f"[AGENT] Startup check — ADVISORY_FOLDERS={ADVISORY_FOLDERS}", flush=True)
 print(f"[AGENT] Startup check — ADVISORY_SPACES={ADVISORY_SPACES or '(not set — add via HF secret to catch master tickets)'}", flush=True)
 print(f"[AGENT] Startup check — ADVISORY_INTAKE_DELAY_SECONDS={ADVISORY_INTAKE_DELAY_SECONDS}s", flush=True)
+print(f"[AGENT] Startup check — DE_TIME_TRACKING_FOLDERS={DE_TIME_TRACKING_FOLDERS}", flush=True)
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 CLICKUP_BASE = "https://api.clickup.com/api/v2"
@@ -1450,6 +1451,7 @@ async def run_de_time_tracking_track(task_id: str, history_items: list) -> None:
     head = history_items[0] if history_items else {}
     after_status = _extract_history_status(head.get("after"))
     before_status = _extract_history_status(head.get("before"))
+    print(f"[TIMETRACK] {task_id} status transition '{before_status}' -> '{after_status}'", flush=True)
     if after_status and after_status != "complete":
         return
 
