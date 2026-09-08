@@ -30,6 +30,9 @@ CLICKUP_API_KEY = os.environ.get("CLICKUP_API_KEY")
 ENFORCEMENT_FOLDERS = os.environ.get("ENFORCEMENT_FOLDERS", "90165998786").split(",")
 ENFORCEMENT_SPACES  = [x.strip() for x in os.environ.get("ENFORCEMENT_SPACES", "").split(",") if x.strip()]
 
+# DE Space time tracking check (independent from INTAKE/PRE-EXEC/CLOSURE gates)
+DE_TIME_TRACKING_FOLDERS = [x.strip() for x in os.environ.get("DE_TIME_TRACKING_FOLDERS", "90169104190").split(",") if x.strip()]
+
 # Client folders/spaces for advisory mode (comment only, no status changes).
 _DEFAULT_ADVISORY_FOLDERS = ",".join([
     "90161200308",  # HexClad
@@ -1375,6 +1378,87 @@ async def revert_status(task_id, status) -> bool:
             return False
 
 
+async def assignee_has_tracked_time(task_id: str, assignee_id: str) -> bool:
+    """Check if the assignee has tracked any time on the task."""
+    if not assignee_id:
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(
+                f"{CLICKUP_BASE}/task/{task_id}/time_entries",
+                headers={"Authorization": CLICKUP_API_KEY},
+            )
+            if resp.status_code < 300:
+                data = resp.json()
+                entries = data.get("data", [])
+                # Check if assignee has any time entries
+                for entry in entries:
+                    if str(entry.get("user", {}).get("id", "")) == str(assignee_id):
+                        return True
+                return False
+            else:
+                print(f"[AGENT] ⚠️ Time entries fetch failed (HTTP {resp.status_code})", flush=True)
+                return False
+    except Exception as e:
+        print(f"[AGENT] ⚠️ Exception checking time entries: {e}", flush=True)
+        return False
+
+
+async def check_de_time_tracking(task: dict, previous_status: str) -> None:
+    """Run the DE Time Tracking Check. Reverts status if assignee hasn't tracked time."""
+    task_id = task.get("id", "")
+    current_status = (task.get("status") or {}).get("status", "").lower()
+    assignees = task.get("assignees", [])
+
+    if not task_id or current_status != "complete":
+        return
+
+    if not previous_status:
+        print(f"[AGENT] DE Time Tracking — no previous status to revert to", flush=True)
+        return
+
+    print(f"[AGENT] DE Time Tracking Check — task moved to Complete, checking assignee time entries", flush=True)
+
+    # If multiple assignees, check if ANY of them tracked time
+    # But requirement says "assignee" (singular), so typically one per ticket
+    has_time = False
+    for assignee in assignees:
+        assignee_id = str(assignee.get("id", ""))
+        if await assignee_has_tracked_time(task_id, assignee_id):
+            has_time = True
+            break
+
+    if has_time:
+        print(f"[AGENT] DE Time Tracking Check — PASS, assignee has tracked time", flush=True)
+        # Post success comment
+        comment_blocks = [
+            {"text": "✅ Subinspector DE Time Tracking Check\n", "attributes": {"bold": True}},
+            {"text": "\n"},
+            {"text": "Assignee has tracked time on this ticket. Status can remain Complete.\n"},
+        ]
+        await post_comment(task_id, {"comment": comment_blocks})
+    else:
+        print(f"[AGENT] DE Time Tracking Check — FAIL, no time tracked by assignee, reverting to '{previous_status}'", flush=True)
+        # Revert status
+        await revert_status(task_id, previous_status)
+        # Post failure comment
+        comment_blocks = [
+            {"text": "❌ Subinspector DE Time Tracking Check\n", "attributes": {"bold": True}},
+            {"text": "\n"},
+            {"text": "⚠️ Assignee has not tracked time on this ticket.\n"},
+            {"text": "\n"},
+            {"text": "Status reverted from ", "attributes": {}},
+            {"text": "Complete", "attributes": {"bold": True}},
+            {"text": " to ", "attributes": {}},
+            {"text": previous_status, "attributes": {"bold": True}},
+            {"text": ".\n"},
+            {"text": "\n"},
+            {"text": "Rule: ", "attributes": {"bold": True}},
+            {"text": "Time tracking by assignee is required before a ticket can remain in Complete status.\n"},
+        ]
+        await post_comment(task_id, {"comment": comment_blocks})
+
+
 def format_comment(gate, content, score_display, passed, prior_failures=0, reverted_to=None, advisory=False, assignees=None, bi_subtrack=None):
     """Parse LLM output and return a ClickUp rich-text comment block array.
 
@@ -1795,6 +1879,14 @@ async def process_webhook(payload):
     if history_items:
         before = history_items[0].get("before") or {}
         previous_status = ((before.get("status", "") if isinstance(before, dict) else "") or "").lower()
+
+    # ── DE Time Tracking Check (independent from gate logic) ──────────────────
+    # Runs independently on taskStatusUpdated → Complete for DE Space tickets
+    if folder_id in DE_TIME_TRACKING_FOLDERS and event == "taskStatusUpdated" and status == "complete":
+        print(f"[AGENT] DE Time Tracking Check — triggered", flush=True)
+        await check_de_time_tracking(task, previous_status)
+        # Note: this runs independently AND the gate logic below still runs
+        # Both are mutually exclusive but both execute
 
     gate, is_dry_run, trigger_comment_id, tier_override = determine_gate(event, status, history_items)
 
