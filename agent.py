@@ -1536,7 +1536,9 @@ async def _de_time_tracking_decide(task_id: str, before_status: str) -> None:
             {"text": "  -  Could not reopen the ticket automatically — please move it back manually\n"},
             {"text": f"  -  Intended status: {before_status}\n"},
         ]
-    await post_comment(task_id, {"comment": blocks})
+    # post_comment wraps a list as a rich-text block array; a dict would fall
+    # through to comment_text and land in ClickUp as "[object Object]".
+    await post_comment(task_id, blocks)
     print(f"[TIMETRACK] {task_id} FAIL — reopened to '{before_status}' (revert_ok={reverted})", flush=True)
 
 
