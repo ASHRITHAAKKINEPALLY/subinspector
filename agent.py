@@ -1818,6 +1818,24 @@ async def process_webhook(payload):
     list_id   = str((task.get("list")   or {}).get("id", ""))
     space_id  = str((task.get("space")  or {}).get("id", ""))
 
+    # ── DE Time Tracking Check (runs BEFORE bot loop prevention) ──────────────
+    # Runs independently on taskStatusUpdated → Complete for DE Space tickets
+    status_for_tracking = (task.get("status") or {}).get("status", "").lower()
+    previous_status_for_tracking = ""
+    if history_items:
+        before = history_items[0].get("before") or {}
+        previous_status_for_tracking = ((before.get("status", "") if isinstance(before, dict) else "") or "").lower()
+
+    in_de_time_tracking = (
+        folder_id in DE_TIME_TRACKING_FOLDERS
+        or list_id in DE_TIME_TRACKING_FOLDERS
+        or space_id == "3369097"  # Data Engineering space ID
+    )
+    if in_de_time_tracking and event == "taskStatusUpdated" and status_for_tracking == "complete":
+        print(f"[AGENT] DE Time Tracking Check — triggered (task moved to Complete)", flush=True)
+        await check_de_time_tracking(task, previous_status_for_tracking)
+        # Note: this runs independently, then gate logic continues below
+
     # Three-level scope check (OR logic):
     #   folder.id → catches regular sprint/project tasks
     #   list.id   → fallback for tasks whose folder.id = "none" (list directly in space)
@@ -1879,20 +1897,6 @@ async def process_webhook(payload):
     if history_items:
         before = history_items[0].get("before") or {}
         previous_status = ((before.get("status", "") if isinstance(before, dict) else "") or "").lower()
-
-    # ── DE Time Tracking Check (independent from gate logic) ──────────────────
-    # Runs independently on taskStatusUpdated → Complete for DE Space tickets
-    # Check by folder_id, list_id, or space_id to catch all tickets in the space/folder
-    in_de_time_tracking = (
-        folder_id in DE_TIME_TRACKING_FOLDERS
-        or list_id in DE_TIME_TRACKING_FOLDERS
-        or space_id == "3369097"  # Data Engineering space ID
-    )
-    if in_de_time_tracking and event == "taskStatusUpdated" and status == "complete":
-        print(f"[AGENT] DE Time Tracking Check — triggered", flush=True)
-        await check_de_time_tracking(task, previous_status)
-        # Note: this runs independently AND the gate logic below still runs
-        # Both are mutually exclusive but both execute
 
     gate, is_dry_run, trigger_comment_id, tier_override = determine_gate(event, status, history_items)
 
