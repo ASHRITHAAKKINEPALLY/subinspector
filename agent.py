@@ -36,7 +36,23 @@ ENFORCEMENT_SPACES  = [x.strip() for x in os.environ.get("ENFORCEMENT_SPACES", "
 # Keep the two apart — a space id will never equal a folder id, so mixing them
 # silently matches nothing.
 DE_TIME_TRACKING_FOLDERS = [x.strip() for x in os.environ.get("DE_TIME_TRACKING_FOLDERS", "90169104190").split(",") if x.strip()]
-DE_TIME_TRACKING_SPACES  = [x.strip() for x in os.environ.get("DE_TIME_TRACKING_SPACES", "90167921604").split(",") if x.strip()]
+DE_TIME_TRACKING_SPACES  = [x.strip() for x in os.environ.get("DE_TIME_TRACKING_SPACES", "90167921604,61473752").split(",") if x.strip()]
+
+# Folders carved out of the space-wide sweep. Space 61473752 is the whole Data
+# Engineering space (79 folders), which also holds admin and HR folders where
+# "the assignee must log time before this can be Complete" is meaningless.
+# Exclusion wins over every include, so listing a folder here disables the track
+# for it even if its space or the folder itself is configured above.
+_DEFAULT_DE_TIME_TRACKING_EXCLUDE = ",".join([
+    "90020738121",  # PIP
+    "90160555567",  # Job Description
+    "90163932593",  # Job Roles & Description DE
+    "90020652368",  # Training and Development
+    "90020652548",  # Team Documents
+    "90168860158",  # Knowledge Hub
+    "90167808719",  # Process Orientation
+])
+DE_TIME_TRACKING_EXCLUDE_FOLDERS = [x.strip() for x in os.environ.get("DE_TIME_TRACKING_EXCLUDE_FOLDERS", _DEFAULT_DE_TIME_TRACKING_EXCLUDE).split(",") if x.strip()]
 
 # Client folders/spaces for advisory mode (comment only, no status changes).
 _DEFAULT_ADVISORY_FOLDERS = ",".join([
@@ -79,6 +95,7 @@ print(f"[AGENT] Startup check — ADVISORY_SPACES={ADVISORY_SPACES or '(not set 
 print(f"[AGENT] Startup check — ADVISORY_INTAKE_DELAY_SECONDS={ADVISORY_INTAKE_DELAY_SECONDS}s", flush=True)
 print(f"[AGENT] Startup check — DE_TIME_TRACKING_FOLDERS={DE_TIME_TRACKING_FOLDERS}", flush=True)
 print(f"[AGENT] Startup check — DE_TIME_TRACKING_SPACES={DE_TIME_TRACKING_SPACES}", flush=True)
+print(f"[AGENT] Startup check — DE_TIME_TRACKING_EXCLUDE_FOLDERS={DE_TIME_TRACKING_EXCLUDE_FOLDERS}", flush=True)
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 CLICKUP_BASE = "https://api.clickup.com/api/v2"
@@ -1484,6 +1501,9 @@ async def _de_time_tracking_decide(task_id: str, before_status: str) -> None:
     folder_id = str((task.get("folder") or {}).get("id", ""))
     list_id   = str((task.get("list")   or {}).get("id", ""))
     space_id  = str((task.get("space")  or {}).get("id", ""))
+    if folder_id in DE_TIME_TRACKING_EXCLUDE_FOLDERS or list_id in DE_TIME_TRACKING_EXCLUDE_FOLDERS:
+        print(f"[TIMETRACK] {task_id} skipped — folder/list is excluded (folder={folder_id} list={list_id})", flush=True)
+        return
     if not (
         folder_id in DE_TIME_TRACKING_FOLDERS
         or list_id in DE_TIME_TRACKING_FOLDERS

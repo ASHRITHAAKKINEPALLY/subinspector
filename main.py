@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from agent import (
     process_webhook, scan_and_backfill, CLICKUP_API_KEY, ENFORCEMENT_FOLDERS,
     DE_TIME_TRACKING_FOLDERS, DE_TIME_TRACKING_SPACES,
+    DE_TIME_TRACKING_EXCLUDE_FOLDERS,
 )
 import traceback
 import asyncio
@@ -12,7 +13,7 @@ import httpx
 # Bump on every deploy. /health echoes it, so "is my code live on HF?" is one
 # curl instead of a log hunt — HF reports stage=RUNNING while still serving the
 # previous container.
-BUILD_MARKER = "2026-09-08-timetrack-3"
+BUILD_MARKER = "2026-09-08-timetrack-4"
 
 CLICKUP_TEAM_ID  = os.environ.get("CLICKUP_TEAM_ID", "3369097")
 WEBHOOK_ENDPOINT = os.environ.get("WEBHOOK_ENDPOINT", "https://ashakkinepally-subinspector.hf.space/webhook")
@@ -135,6 +136,7 @@ async def health():
         "build": BUILD_MARKER,
         "de_time_tracking_folders": DE_TIME_TRACKING_FOLDERS,
         "de_time_tracking_spaces": DE_TIME_TRACKING_SPACES,
+        "de_time_tracking_excluded": DE_TIME_TRACKING_EXCLUDE_FOLDERS,
     }
 
 @app.get("/")

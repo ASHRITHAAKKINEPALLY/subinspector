@@ -289,6 +289,122 @@ check("IH NOT in ADVISORY_FOLDERS (enforcement only)", "90165998786" not in agen
 check("Random internal folder NOT in either list",
       "99999999999" not in agent.ENFORCEMENT_FOLDERS and "99999999999" not in agent.ADVISORY_FOLDERS)
 
+# ── DE TIME-TRACKING TRACK ───────────────────────────────────────────────────
+section("DE Time-Tracking Track")
+
+# Real shapes, taken from live ClickUp fetches and the HF webhook logs.
+_TT_TASK = {
+    "id": "86d4a4afx",
+    "status": {"status": "complete", "type": "closed"},
+    "assignees": [{"id": 100965864, "username": "Ashritha Akkinepally"}],
+    "list":   {"id": "901616481255", "name": "Consulting Backlog"},
+    "folder": {"id": "90169104190",  "name": "Pulse Implementation Intake"},
+    "space":  {"id": "61473752"},
+    "time_spent": 0,
+}
+_TT_HISTORY = [{
+    "id": "x", "type": 1, "field": "status", "data": {"status_type": "closed"},
+    "user":   {"id": 100965864},
+    # ClickUp puts before/after at the TOP level of the history item, not under
+    # "data" — reading them from data.after is what silently broke this track.
+    "before": {"status": "development", "type": "custom", "orderindex": 2},
+    "after":  {"status": "complete",    "type": "closed", "orderindex": 18},
+}]
+
+
+async def _tt_run(task, owners, history=None):
+    """Drive the track with the network stubbed. Returns (revert_calls, comments)."""
+    reverts, comments = [], []
+    orig = (agent.fetch_task, agent.tracked_time_owner_ids,
+            agent.revert_status, agent.post_comment)
+    fetches = []
+
+    async def _fetch(tid):
+        fetches.append(tid); return task
+
+    async def _owners(tid):
+        return owners
+
+    async def _revert(tid, status):
+        reverts.append((tid, status)); return True
+
+    async def _comment(tid, payload, reply_to_comment_id=None):
+        comments.append(payload)
+
+    agent.fetch_task = _fetch
+    agent.tracked_time_owner_ids = _owners
+    agent.revert_status = _revert
+    agent.post_comment = _comment
+    agent._TIMETRACK_IN_FLIGHT.clear()
+    try:
+        await agent.run_de_time_tracking_track(task["id"], history or _TT_HISTORY)
+    finally:
+        (agent.fetch_task, agent.tracked_time_owner_ids,
+         agent.revert_status, agent.post_comment) = orig
+    return reverts, comments, fetches
+
+
+def _tt_case(name, *, task=None, owners=frozenset(), history=None,
+             expect_revert, expect_target="development"):
+    t = dict(_TT_TASK, **(task or {}))
+    reverts, comments, _ = asyncio.run(_tt_run(t, owners, history))
+    did = bool(reverts)
+    ok = did == expect_revert
+    detail = ""
+    if not ok:
+        detail = f"expected revert={expect_revert}, got {did}"
+    elif did and reverts[0][1] != expect_target:
+        ok, detail = False, f"reopened to {reverts[0][1]!r}, expected {expect_target!r}"
+    # post_comment renders rich text only for a list; a dict becomes
+    # comment_text and lands in ClickUp as "[object Object]".
+    for payload in comments:
+        if not isinstance(payload, list):
+            ok, detail = False, f"comment payload is {type(payload).__name__}, must be list"
+        elif not all(isinstance(b, dict) and "text" in b for b in payload):
+            ok, detail = False, "every comment block needs a 'text' key"
+    check(name, ok, detail)
+
+
+# Scope resolution
+check("DE intake folder in FOLDERS scope", "90169104190" in agent.DE_TIME_TRACKING_FOLDERS)
+check("iQ Enterprise space in SPACES scope", "90167921604" in agent.DE_TIME_TRACKING_SPACES)
+check("Data Engineering space in SPACES scope", "61473752" in agent.DE_TIME_TRACKING_SPACES)
+check("PIP folder is excluded", "90020738121" in agent.DE_TIME_TRACKING_EXCLUDE_FOLDERS)
+check("Job Description folder is excluded", "90160555567" in agent.DE_TIME_TRACKING_EXCLUDE_FOLDERS)
+check("A real client folder is NOT excluded",
+      "90163780691" not in agent.DE_TIME_TRACKING_EXCLUDE_FOLDERS)
+
+# Behaviour — reopen path
+_tt_case("No time logged → reopens to the pre-Complete status", expect_revert=True)
+_tt_case("Only a non-assignee logged → still reopens",
+         owners={"999999"}, expect_revert=True)
+_tt_case("Time API blocked, task total 0ms → reopens via fallback",
+         owners=None, expect_revert=True)
+_tt_case("Any DE-space folder now in scope (True Classic)",
+         task={"folder": {"id": "90163780691"}, "list": {"id": "77"}},
+         expect_revert=True)
+
+# Behaviour — leave-alone path
+_tt_case("Assignee logged time → stays Complete",
+         owners={"100965864"}, expect_revert=False)
+_tt_case("Time API blocked but time exists → left alone, not reopened",
+         task={"time_spent": 3600000}, owners=None, expect_revert=False)
+_tt_case("Excluded folder wins over its in-scope space (PIP)",
+         task={"folder": {"id": "90020738121"}, "list": {"id": "77"}},
+         expect_revert=False)
+_tt_case("Unconfigured space is ignored",
+         task={"folder": {"id": "111"}, "list": {"id": "222"}, "space": {"id": "999"}},
+         expect_revert=False)
+_tt_case("Unassigned ticket is left alone", task={"assignees": []}, expect_revert=False)
+_tt_case("Previous status unknown → cannot reopen dynamically",
+         history=[dict(_TT_HISTORY[0], before={})], expect_revert=False)
+
+# A non-Complete transition must not even spend an API call.
+_nc = [dict(_TT_HISTORY[0], before={"status": "backlog"}, after={"status": "in progress"})]
+_r, _c, _f = asyncio.run(_tt_run(dict(_TT_TASK), frozenset(), _nc))
+check("Move to 'in progress' costs no fetch and no revert",
+      not _f and not _r, f"fetches={len(_f)} reverts={len(_r)}")
+
 # ── SUMMARY ──────────────────────────────────────────────────────────────────
 total  = len(results)
 passed_count = sum(results)
