@@ -51,6 +51,7 @@ _DEFAULT_DE_TIME_TRACKING_EXCLUDE = ",".join([
     "90020652548",  # Team Documents
     "90168860158",  # Knowledge Hub
     "90167808719",  # Process Orientation
+    "90167636510",  # DE Quality Assurance
 ])
 DE_TIME_TRACKING_EXCLUDE_FOLDERS = [x.strip() for x in os.environ.get("DE_TIME_TRACKING_EXCLUDE_FOLDERS", _DEFAULT_DE_TIME_TRACKING_EXCLUDE).split(",") if x.strip()]
 

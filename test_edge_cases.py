@@ -371,6 +371,8 @@ check("iQ Enterprise space in SPACES scope", "90167921604" in agent.DE_TIME_TRAC
 check("Data Engineering space in SPACES scope", "61473752" in agent.DE_TIME_TRACKING_SPACES)
 check("PIP folder is excluded", "90020738121" in agent.DE_TIME_TRACKING_EXCLUDE_FOLDERS)
 check("Job Description folder is excluded", "90160555567" in agent.DE_TIME_TRACKING_EXCLUDE_FOLDERS)
+check("DE Quality Assurance folder is excluded",
+      "90167636510" in agent.DE_TIME_TRACKING_EXCLUDE_FOLDERS)
 check("A real client folder is NOT excluded",
       "90163780691" not in agent.DE_TIME_TRACKING_EXCLUDE_FOLDERS)
 
@@ -391,6 +393,9 @@ _tt_case("Time API blocked but time exists → left alone, not reopened",
          task={"time_spent": 3600000}, owners=None, expect_revert=False)
 _tt_case("Excluded folder wins over its in-scope space (PIP)",
          task={"folder": {"id": "90020738121"}, "list": {"id": "77"}},
+         expect_revert=False)
+_tt_case("DE Quality Assurance is skipped despite being in the DE space",
+         task={"folder": {"id": "90167636510"}, "list": {"id": "901613763474"}},
          expect_revert=False)
 _tt_case("Unconfigured space is ignored",
          task={"folder": {"id": "111"}, "list": {"id": "222"}, "space": {"id": "999"}},

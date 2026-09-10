@@ -13,7 +13,7 @@ import httpx
 # Bump on every deploy. /health echoes it, so "is my code live on HF?" is one
 # curl instead of a log hunt — HF reports stage=RUNNING while still serving the
 # previous container.
-BUILD_MARKER = "2026-09-08-timetrack-4"
+BUILD_MARKER = "2026-09-08-timetrack-5"
 
 CLICKUP_TEAM_ID  = os.environ.get("CLICKUP_TEAM_ID", "3369097")
 WEBHOOK_ENDPOINT = os.environ.get("WEBHOOK_ENDPOINT", "https://ashakkinepally-subinspector.hf.space/webhook")
